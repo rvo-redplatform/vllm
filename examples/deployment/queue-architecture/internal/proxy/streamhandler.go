@@ -128,11 +128,59 @@ func frameRedisPayload(payload map[string]interface{}) (frame string, terminal b
 		return "data: [DONE]\n\n", true
 	}
 
+	if isErr, ok := payload["error"].(bool); ok && isErr {
+		return frameErrorPayload(payload), false
+	}
+
 	data, err := json.Marshal(payload)
 	if err != nil {
 		return "data: {\"error\": \"marshal failed\"}\n\n", false
 	}
 	return fmt.Sprintf("data: %s\n\n", string(data)), false
+}
+
+// frameErrorPayload translates the sidecar's internal error transport shape
+// (ForwardStreaming's {"error": true, "status": <code>, "body": "<raw
+// upstream body>"}, published when the upstream rejects a request before any
+// SSE data is produced) into a standard OpenAI-compatible SSE error frame.
+// Forwarding the raw internal shape verbatim breaks strict OpenAI-compatible
+// SSE clients (e.g. the Vercel AI SDK used by opencode): a bare boolean
+// "error" field matches neither the chat-completion-chunk schema nor an
+// {"error": <object>} error response.
+//
+// vLLM's own error bodies are already an OpenAI-style {"error": {"message",
+// "type", "param", "code"}} object, so when the body parses as one it is
+// forwarded as-is to preserve the original message/type/code. Otherwise a
+// minimal error object is synthesized from the status and raw body text.
+func frameErrorPayload(payload map[string]interface{}) string {
+	bodyStr, _ := payload["body"].(string)
+
+	var upstream map[string]interface{}
+	if bodyStr != "" && json.Unmarshal([]byte(bodyStr), &upstream) == nil {
+		if _, hasErrorObj := upstream["error"].(map[string]interface{}); hasErrorObj {
+			if data, err := json.Marshal(upstream); err == nil {
+				return fmt.Sprintf("data: %s\n\n", string(data))
+			}
+		}
+	}
+
+	message := bodyStr
+	if message == "" {
+		message = "upstream error"
+	}
+	statusCode, _ := payload["status"].(float64) // json.Unmarshal decodes numbers as float64
+	synthesized := map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": message,
+			"type":    "upstream_error",
+			"code":    int(statusCode),
+		},
+	}
+	data, err := json.Marshal(synthesized)
+	if err != nil {
+		return "data: {\"error\": {\"message\": \"upstream error\", \"type\": \"upstream_error\"}}\n\n"
+	}
+	return fmt.Sprintf("data: %s\n\n", string(data))
 }
 
 // headerMapFromRequest extracts headers from the HTTP request.
