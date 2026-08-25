@@ -67,3 +67,50 @@ func TestFrameRedisPayload_DoneFieldPresentButFalse(t *testing.T) {
 		t.Fatalf("unexpected frame: %q", frame)
 	}
 }
+
+func TestFrameRedisPayload_UpstreamErrorForwardsVLLMErrorObjectAsIs(t *testing.T) {
+	// Confirmed live against the real deployed stack: when vLLM rejects a
+	// request before producing any SSE data (e.g. tool_choice="auto"
+	// without --enable-auto-tool-choice), ForwardStreaming publishes
+	// {"error": true, "status": <code>, "body": "<raw vLLM error JSON>"}.
+	// The bug this guards against: forwarding that internal transport shape
+	// verbatim breaks strict OpenAI-compatible SSE clients (e.g. opencode's
+	// AI SDK) - a bare boolean "error" field matches neither the
+	// chat-completion-chunk schema nor a valid {"error": <object>} response.
+	// vLLM's own error body is already an OpenAI-style error object, so it
+	// should be forwarded as-is rather than re-wrapped.
+	frame, terminal := frameRedisPayload(map[string]interface{}{
+		"error":  true,
+		"status": float64(400),
+		"body":   `{"error":{"message":"\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set","type":"BadRequestError","param":null,"code":400}}`,
+		"model":  "nemotron", // Switchyard adds this as it relays through, same as the done marker
+	})
+
+	if terminal {
+		t.Fatalf("expected terminal=false for an error frame (done sentinel follows separately), got true")
+	}
+	want := "data: {\"error\":{\"code\":400,\"message\":\"\\\"auto\\\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set\",\"param\":null,\"type\":\"BadRequestError\"}}\n\n"
+	if frame != want {
+		t.Fatalf("unexpected frame:\ngot:  %q\nwant: %q", frame, want)
+	}
+}
+
+func TestFrameRedisPayload_UpstreamErrorSynthesizesObjectFromPlainBody(t *testing.T) {
+	// If the upstream error body isn't a parseable OpenAI-style error
+	// object (e.g. a plain-text or unexpected-shape body), a minimal valid
+	// error object must still be synthesized so the client never receives
+	// the raw internal transport shape.
+	frame, terminal := frameRedisPayload(map[string]interface{}{
+		"error":  true,
+		"status": float64(502),
+		"body":   "upstream connection reset",
+	})
+
+	if terminal {
+		t.Fatalf("expected terminal=false for an error frame, got true")
+	}
+	want := "data: {\"error\":{\"code\":502,\"message\":\"upstream connection reset\",\"type\":\"upstream_error\"}}\n\n"
+	if frame != want {
+		t.Fatalf("unexpected frame:\ngot:  %q\nwant: %q", frame, want)
+	}
+}
