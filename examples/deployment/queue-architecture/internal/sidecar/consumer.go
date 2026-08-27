@@ -13,6 +13,61 @@ import (
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/queue"
 )
 
+// writeNonStreamingResult marshals and writes a non-streaming result to
+// Redis (with resultExpiry TTL), using ctx -- which must NOT be a context
+// that may already be expired (e.g. a per-job timeout context after it has
+// fired), or the write itself would fail. Callers processing a timeout
+// must pass the outer, still-live context here, not the expired one.
+func writeNonStreamingResult(ctx context.Context, rdb *redis.Client, jobID string, status int, headers map[string]string, body string, resultExpiry time.Duration) error {
+	result := map[string]interface{}{
+		"status":  status,
+		"headers": headers,
+		"body":    body,
+	}
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return fmt.Errorf("marshal result: %w", err)
+	}
+	resultKey := "result:" + jobID
+	if err := rdb.RPush(ctx, resultKey, resultJSON).Err(); err != nil {
+		return fmt.Errorf("rpush result: %w", err)
+	}
+	if err := rdb.Expire(ctx, resultKey, resultExpiry).Err(); err != nil {
+		return fmt.Errorf("expire result: %w", err)
+	}
+	return nil
+}
+
+// publishStreamTimeout publishes a sidecar-internal error frame followed by
+// the __done sentinel to a streaming job's Pub/Sub channel, using the same
+// {"error": true, "status", "body"} shape ForwardStreaming itself uses for
+// upstream errors -- internal/proxy/streamhandler.go's frameErrorPayload
+// already knows how to translate this into a standard OpenAI-compatible SSE
+// error frame for the client. ctx must be a still-live context (see
+// writeNonStreamingResult's doc comment for why).
+func publishStreamTimeout(ctx context.Context, rdb *redis.Client, jobID string, message string) error {
+	channel := fmt.Sprintf("stream:%s", jobID)
+	errorJSON, err := json.Marshal(map[string]interface{}{
+		"error":  true,
+		"status": http.StatusGatewayTimeout,
+		"body":   message,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal timeout error: %w", err)
+	}
+	if err := rdb.Publish(ctx, channel, string(errorJSON)).Err(); err != nil {
+		return fmt.Errorf("publish timeout error: %w", err)
+	}
+	doneJSON, err := json.Marshal(map[string]bool{"__done": true})
+	if err != nil {
+		return fmt.Errorf("marshal done message: %w", err)
+	}
+	if err := rdb.Publish(ctx, channel, string(doneJSON)).Err(); err != nil {
+		return fmt.Errorf("publish done message: %w", err)
+	}
+	return nil
+}
+
 // processJob handles the per-job processing logic: idempotency check, forwarding,
 // result writing, and acking. This shared helper is used by both ConsumerLoop and
 // ReclaimLoop to ensure identical semantics.
@@ -20,8 +75,33 @@ import (
 // Order matters for crash protection: write the result BEFORE acking -- so a crash
 // between those two steps causes at most wasted redundant work, never a lost answer.
 //
+// jobTimeout bounds the actual forward-to-vLLM call: a fresh context.WithTimeout
+// derived from ctx is created for the forward only, NOT for the idempotency check,
+// result write, or ack (those use ctx directly, so they can still complete even
+// after the forward's deadline has passed).
+//
+// This closes two related failure modes that previously let a single hung
+// forward wedge a job (and its consumer) forever:
+//   - Without a bounded context, a hung/dropped connection to vLLM (or vLLM
+//     itself stalling mid-generation) left the forward call -- and the
+//     worker goroutine running it -- blocked indefinitely. Nothing timed
+//     out, no result was ever written, and the message just sat pending.
+//   - Cancelling the forward's context here also closes the underlying HTTP
+//     connection to vLLM, which is what allows vLLM's own with_cancellation
+//     disconnect-detection (see vllm/entrypoints/serve/utils/api_utils.py)
+//     to actually abort the in-progress generation and free GPU capacity,
+//     instead of continuing to compute for a caller that gave up.
+//
+// On timeout, a real timeout result/SSE-error is written and the job is
+// acked here -- rather than left unacked for ReclaimLoop to pick up -- so
+// the waiting proxy request unblocks immediately with a clear 504 instead
+// of hanging until its own (much longer) REQUEST_TIMEOUT/STREAM_TIMEOUT,
+// and so the message can't be redelivered into an endless reclaim loop by
+// a consumer that will only hit the same timeout again.
+//
 // Parameters:
-//   - ctx: context for cancellation
+//   - ctx: context for cancellation (idempotency check, result write, ack)
+//   - httpClient: HTTP client used for the forward call
 //   - rdb: Redis client
 //   - job: the job to process
 //   - entryID: the Redis stream entry ID (for acking)
@@ -29,10 +109,11 @@ import (
 //   - groupName: consumer group name
 //   - target: base URL of the vLLM instance
 //   - resultExpiry: TTL for result keys in Redis
+//   - jobTimeout: max time allowed for the forward-to-vLLM call
 //
 // Returns error only for infrastructure failures; per-job errors are logged and
 // the function returns nil so the caller can continue processing other jobs.
-func processJob(ctx context.Context, rdb *redis.Client, job queue.Job, entryID, streamName, groupName, target string, resultExpiry time.Duration) error {
+func processJob(ctx context.Context, httpClient *http.Client, rdb *redis.Client, job queue.Job, entryID, streamName, groupName, target string, resultExpiry, jobTimeout time.Duration) error {
 	// Check if result already exists (idempotency)
 	exists, err := ResultExists(ctx, rdb, job.JobID)
 	if err != nil {
@@ -49,48 +130,60 @@ func processJob(ctx context.Context, rdb *redis.Client, job queue.Job, entryID, 
 		return nil
 	}
 
+	// jobCtx bounds only the forward call -- see doc comment above. Derived
+	// from ctx so an outer cancellation (e.g. a real infra error on a
+	// sibling worker) still propagates, but ctx itself is otherwise
+	// long-lived (workCtx, per ConsumerLoop/ReclaimLoop) and must remain
+	// usable after jobCtx expires so the timeout result can still be
+	// written and the job still acked.
+	jobCtx, cancelJob := context.WithTimeout(ctx, jobTimeout)
+	defer cancelJob()
+
 	// Dispatch to the appropriate forwarder based on job.Stream
 	if job.Stream {
 		// Streaming job: forward to ForwardStreaming
-		if err := ForwardStreaming(ctx, rdb, job, target); err != nil {
-			log.Printf("ERROR: forward streaming job %s: %v", job.JobID, err)
-			return nil // Per-job error, don't fail the loop
+		if err := ForwardStreaming(jobCtx, httpClient, rdb, job, target); err != nil {
+			if jobCtx.Err() != nil {
+				log.Printf("TIMEOUT: streaming job %s exceeded JOB_TIMEOUT=%v, aborting forward and notifying client", job.JobID, jobTimeout)
+				if pubErr := publishStreamTimeout(ctx, rdb, job.JobID, fmt.Sprintf("request timed out after %v", jobTimeout)); pubErr != nil {
+					log.Printf("ERROR: publish stream timeout for job %s: %v", job.JobID, pubErr)
+					return nil // Per-job error, don't fail the loop
+				}
+				// Fall through to ack below: the client has been notified,
+				// don't leave this message pending for reclaim.
+			} else {
+				log.Printf("ERROR: forward streaming job %s: %v", job.JobID, err)
+				return nil // Per-job error, don't fail the loop -- leave unacked for reclaim/retry
+			}
 		}
 	} else {
 		// Non-streaming job: forward and write result
-		status, headers, body, err := ForwardNonStreaming(ctx, job, target)
+		status, headers, body, err := ForwardNonStreaming(jobCtx, httpClient, job, target)
 		if err != nil {
-			log.Printf("ERROR: forward non-streaming job %s: %v", job.JobID, err)
-			return nil // Per-job error, don't fail the loop
-		}
-
-		// Build the result object
-		result := map[string]interface{}{
-			"status":  status,
-			"headers": headers,
-			"body":    string(body),
-		}
-
-		// Marshal result to JSON
-		resultJSON, err := json.Marshal(result)
-		if err != nil {
-			log.Printf("ERROR: marshal result for job %s: %v", job.JobID, err)
-			return nil // Per-job error, don't fail the loop
-		}
-
-		// Write result to Redis with expiry (BEFORE acking for crash protection)
-		resultKey := "result:" + job.JobID
-		if err := rdb.RPush(ctx, resultKey, resultJSON).Err(); err != nil {
-			log.Printf("ERROR: rpush result for job %s: %v", job.JobID, err)
-			return nil // Per-job error, don't fail the loop
-		}
-		if err := rdb.Expire(ctx, resultKey, resultExpiry).Err(); err != nil {
-			log.Printf("ERROR: expire result for job %s: %v", job.JobID, err)
-			return nil // Per-job error, don't fail the loop
+			if jobCtx.Err() != nil {
+				log.Printf("TIMEOUT: job %s exceeded JOB_TIMEOUT=%v, aborting forward and notifying client", job.JobID, jobTimeout)
+				timeoutBody := fmt.Sprintf(`{"error":{"message":"request timed out after %v","type":"upstream_timeout","code":504}}`, jobTimeout)
+				if writeErr := writeNonStreamingResult(ctx, rdb, job.JobID, http.StatusGatewayTimeout, map[string]string{"Content-Type": "application/json"}, timeoutBody, resultExpiry); writeErr != nil {
+					log.Printf("ERROR: write timeout result for job %s: %v", job.JobID, writeErr)
+					return nil // Per-job error, don't fail the loop
+				}
+				// Fall through to ack below: the client has been notified,
+				// don't leave this message pending for reclaim.
+			} else {
+				log.Printf("ERROR: forward non-streaming job %s: %v", job.JobID, err)
+				return nil // Per-job error, don't fail the loop -- leave unacked for reclaim/retry
+			}
+		} else {
+			// Write result to Redis with expiry (BEFORE acking for crash protection)
+			if err := writeNonStreamingResult(ctx, rdb, job.JobID, status, headers, string(body), resultExpiry); err != nil {
+				log.Printf("ERROR: write result for job %s: %v", job.JobID, err)
+				return nil // Per-job error, don't fail the loop
+			}
 		}
 	}
 
-	// Ack the job (after writing result for non-streaming)
+	// Ack the job (after writing result for non-streaming, or notifying the
+	// client of a timeout for either job type).
 	if err := queue.Ack(ctx, rdb, streamName, groupName, entryID); err != nil {
 		log.Printf("ERROR: ack job %s: %v", job.JobID, err)
 		return nil // Per-job error, don't fail the loop
@@ -161,13 +254,16 @@ func processJob(ctx context.Context, rdb *redis.Client, job queue.Job, entryID, 
 //   - consumerName: consumer name within the group
 //   - target: base URL of the vLLM instance (e.g., "http://localhost:8000")
 //   - resultExpiry: TTL for result keys in Redis
-//   - httpClient: HTTP client used for the lightweight /health and /metrics probes
+//   - jobTimeout: max time allowed for a single job's forward-to-vLLM call
+//     before it's treated as timed out (see processJob's doc comment)
+//   - probeClient: HTTP client used for the lightweight /health and /metrics probes
+//   - forwardClient: HTTP client used for the actual job forward to vLLM
 //   - maxConcurrent: number of concurrent worker goroutines, and the vLLM running+waiting
 //     threshold each worker gates on before claiming (<=0 is treated as 1 -- always at
 //     least one worker; the capacity gate itself is separately disabled by health.go's
 //     own <=0 check on this same value)
 //   - capacityPollInterval: how often to re-check vLLM's load while waiting for capacity
-func ConsumerLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry time.Duration, httpClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
+func ConsumerLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry, jobTimeout time.Duration, probeClient, forwardClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
 	workers := maxConcurrent
 	if workers <= 0 {
 		workers = 1
@@ -208,7 +304,7 @@ func ConsumerLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, strea
 			// message. Uses claimCtx so this wait is itself interruptible
 			// by shutdown -- no point checking capacity if we're about to
 			// stop claiming anyway.
-			if err := waitForCapacity(claimCtx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
+			if err := waitForCapacity(claimCtx, probeClient, target, maxConcurrent, capacityPollInterval); err != nil {
 				if shutdownCtx.Err() == nil {
 					recordFatal(err)
 				}
@@ -234,7 +330,7 @@ func ConsumerLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, strea
 			// shutdown, so already-spent GPU compute is never wasted.
 			// Only after this call returns does the worker loop back and
 			// check the shutdown gate again.
-			if err := processJob(workCtx, rdb, job, entryID, streamName, groupName, target, resultExpiry); err != nil {
+			if err := processJob(workCtx, forwardClient, rdb, job, entryID, streamName, groupName, target, resultExpiry, jobTimeout); err != nil {
 				recordFatal(err)
 				return
 			}
@@ -288,11 +384,14 @@ func ConsumerLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, strea
 //   - resultExpiry: TTL for result keys in Redis
 //   - idleThreshold: minimum idle time before a job is eligible for reclaim
 //   - reclaimInterval: how often to run the reclaim check
-//   - httpClient: HTTP client used for the lightweight /health and /metrics probes
+//   - jobTimeout: max time allowed for a single job's forward-to-vLLM call
+//     before it's treated as timed out (see processJob's doc comment)
+//   - probeClient: HTTP client used for the lightweight /health and /metrics probes
+//   - forwardClient: HTTP client used for the actual job forward to vLLM
 //   - maxConcurrent: number of concurrent worker goroutines per batch, and the vLLM
 //     running+waiting threshold each worker gates on (<=0 is treated as 1 worker)
 //   - capacityPollInterval: how often to re-check vLLM's load while waiting for capacity
-func ReclaimLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry, idleThreshold, reclaimInterval time.Duration, httpClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
+func ReclaimLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, streamName, groupName, consumerName, target string, resultExpiry, idleThreshold, reclaimInterval, jobTimeout time.Duration, probeClient, forwardClient *http.Client, maxConcurrent int, capacityPollInterval time.Duration) error {
 	ticker := time.NewTicker(reclaimInterval)
 	defer ticker.Stop()
 
@@ -356,7 +455,7 @@ func ReclaimLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, stream
 							return
 						default:
 						}
-						if err := waitForCapacity(claimCtx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
+						if err := waitForCapacity(claimCtx, probeClient, target, maxConcurrent, capacityPollInterval); err != nil {
 							if shutdownCtx.Err() == nil {
 								recordFatal(err)
 							}
@@ -365,7 +464,7 @@ func ReclaimLoop(shutdownCtx, workCtx context.Context, rdb *redis.Client, stream
 						// Claimed -- process on workCtx, NOT
 						// claimCtx/shutdownCtx, so shutdown never aborts
 						// in-flight reclaimed work either.
-						if err := processJob(workCtx, rdb, cj.Job, cj.EntryID, streamName, groupName, target, resultExpiry); err != nil {
+						if err := processJob(workCtx, forwardClient, rdb, cj.Job, cj.EntryID, streamName, groupName, target, resultExpiry, jobTimeout); err != nil {
 							recordFatal(err)
 							return
 						}

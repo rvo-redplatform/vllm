@@ -317,6 +317,14 @@ sidecar:
      # -- Interval for reclaiming idle requests (optional, default 30s)
     - name: RECLAIM_INTERVAL
       value: "30s"
+    # -- Per-job forward-to-vLLM timeout (optional, default 8m). Must stay
+    # comfortably below IDLE_THRESHOLD: every job should time out and get
+    # acked on its own well before the reclaim loop would otherwise need to
+    # notice it, so a hung/stuck forward can't be endlessly reclaimed back
+    # onto the same consumer with no progress. On timeout, the client
+    # receives a 504 and vLLM's in-progress generation is aborted.
+    - name: JOB_TIMEOUT
+      value: "8m"
 
 # -- Standalone proxy Deployment+Service configuration (optional, disabled by default)
 proxy:

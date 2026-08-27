@@ -64,6 +64,40 @@ func main() {
 		log.Fatalf("Invalid RECLAIM_INTERVAL: %v", err)
 	}
 
+	// Parse JOB_TIMEOUT (default 8m) -- the maximum time a single job's
+	// forward-to-vLLM call is allowed to take before the sidecar gives up
+	// on it, cancels the request (closing the connection so vLLM's own
+	// with_cancellation aborts the in-progress generation and frees GPU
+	// capacity), writes a 504 timeout result/SSE-error for the waiting
+	// client, and acks the message.
+	//
+	// Without this bound, a hung or dropped connection to vLLM previously
+	// blocked a worker goroutine forever: no timeout ever fired, no result
+	// was ever written, and the message sat pending until ReclaimLoop's
+	// IDLE_THRESHOLD -- at which point it was frequently reclaimed right
+	// back onto the SAME stuck consumer, repeating forever with a growing
+	// delivery count and no progress.
+	//
+	// Deliberately kept well BELOW IDLE_THRESHOLD (default 10m): every job
+	// should resolve -- successfully or via this timeout -- on its own,
+	// well before ReclaimLoop would otherwise need to notice it. Real
+	// large-context / complex requests can legitimately take several
+	// minutes; this is not a typical per-request HTTP timeout (see
+	// cmd/proxy/main.go's REQUEST_TIMEOUT/STREAM_TIMEOUT for the client-facing
+	// equivalent, which defaults much longer since a request may also
+	// legitimately queue behind other jobs before a sidecar even starts it).
+	jobTimeoutStr := os.Getenv("JOB_TIMEOUT")
+	if jobTimeoutStr == "" {
+		jobTimeoutStr = "8m"
+	}
+	jobTimeout, err := time.ParseDuration(jobTimeoutStr)
+	if err != nil {
+		log.Fatalf("Invalid JOB_TIMEOUT: %v", err)
+	}
+	if jobTimeout >= idleThreshold {
+		log.Printf("WARNING: JOB_TIMEOUT=%v is >= IDLE_THRESHOLD=%v -- a hung job could still be reclaimed before it times out on its own, re-introducing the stuck-consumer symptom this setting exists to prevent. JOB_TIMEOUT should be set comfortably below IDLE_THRESHOLD.", jobTimeout, idleThreshold)
+	}
+
 	// Parse MAX_CONCURRENT_REQUESTS (default 2 -- matches the measured real
 	// concurrency ceiling for large-context requests on a single GPU; see
 	// internal/sidecar/health.go for why this gates claims against vLLM's
@@ -124,17 +158,28 @@ func main() {
 	})
 
 	// Lightweight HTTP client used only for the /health and /metrics probes
-	// against VLLM_TARGET -- separate from the (unbounded-timeout) client
-	// used inside the actual forwarders, since these probes should always
-	// be fast and shouldn't ever block on a slow/hung backend.
+	// against VLLM_TARGET -- separate from the client used inside the
+	// actual forwarders, since these probes should always be fast and
+	// shouldn't ever block on a slow/hung backend.
 	probeClient := &http.Client{Timeout: 5 * time.Second}
+
+	// HTTP client used for the actual job forward to vLLM. Timeout is set
+	// here as a defense-in-depth belt-and-suspenders measure -- the primary
+	// bound on a forward's duration is the per-job context.WithTimeout
+	// derived from JOB_TIMEOUT in processJob (internal/sidecar/consumer.go),
+	// which is what actually cancels the request/closes the connection so
+	// vLLM can abort the in-progress generation. This client-level Timeout
+	// covers any request that somehow bypasses that context (e.g. a future
+	// caller mistake), and is set comfortably above JOB_TIMEOUT so it never
+	// fires first and masks the more precise, cancellation-aware timeout.
+	forwardClient := &http.Client{Timeout: jobTimeout + 30*time.Second}
 
 	// Set result expiry to 24 hours
 	resultExpiry := 24 * time.Hour
 
 	// Log startup configuration
-	log.Printf("Starting sidecar consumer: REDIS_ADDR=%s, STREAM_NAME=%s, CONSUMER_GROUP=%s, CONSUMER_NAME=%s, VLLM_TARGET=%s, RESULT_EXPIRY=%v, IDLE_THRESHOLD=%v, RECLAIM_INTERVAL=%v, MAX_CONCURRENT_REQUESTS=%d, CAPACITY_POLL_INTERVAL=%v, HEALTH_CHECK_INTERVAL=%v, MAX_DRAIN_TIMEOUT=%v",
-		redisAddr, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, idleThreshold, reclaimInterval, maxConcurrent, capacityPollInterval, healthCheckInterval, maxDrainTimeout)
+	log.Printf("Starting sidecar consumer: REDIS_ADDR=%s, STREAM_NAME=%s, CONSUMER_GROUP=%s, CONSUMER_NAME=%s, VLLM_TARGET=%s, RESULT_EXPIRY=%v, IDLE_THRESHOLD=%v, RECLAIM_INTERVAL=%v, JOB_TIMEOUT=%v, MAX_CONCURRENT_REQUESTS=%d, CAPACITY_POLL_INTERVAL=%v, HEALTH_CHECK_INTERVAL=%v, MAX_DRAIN_TIMEOUT=%v",
+		redisAddr, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, idleThreshold, reclaimInterval, jobTimeout, maxConcurrent, capacityPollInterval, healthCheckInterval, maxDrainTimeout)
 
 	// shutdownCtx is cancelled on SIGINT/SIGTERM (e.g. KEDA scale-down,
 	// node drain/consolidation). It gates every CLAIM decision in both
@@ -174,7 +219,7 @@ func main() {
 	// Launch ConsumerLoop in a goroutine
 	go func() {
 		defer wg.Done()
-		if err := sidecar.ConsumerLoop(shutdownCtx, workCtx, rdb, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, probeClient, maxConcurrent, capacityPollInterval); err != nil {
+		if err := sidecar.ConsumerLoop(shutdownCtx, workCtx, rdb, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, jobTimeout, probeClient, forwardClient, maxConcurrent, capacityPollInterval); err != nil {
 			errChan <- fmt.Errorf("consumer loop: %w", err)
 		}
 	}()
@@ -182,7 +227,7 @@ func main() {
 	// Launch ReclaimLoop in a goroutine
 	go func() {
 		defer wg.Done()
-		if err := sidecar.ReclaimLoop(shutdownCtx, workCtx, rdb, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, idleThreshold, reclaimInterval, probeClient, maxConcurrent, capacityPollInterval); err != nil {
+		if err := sidecar.ReclaimLoop(shutdownCtx, workCtx, rdb, streamName, consumerGroup, consumerName, vllmTarget, resultExpiry, idleThreshold, reclaimInterval, jobTimeout, probeClient, forwardClient, maxConcurrent, capacityPollInterval); err != nil {
 			errChan <- fmt.Errorf("reclaim loop: %w", err)
 		}
 	}()
