@@ -39,6 +39,7 @@ services:
       VLLM_TARGET: "http://mockvllm:8000"
       IDLE_THRESHOLD: "15s"
       RECLAIM_INTERVAL: "5s"
+      JOB_TIMEOUT: "10s"
     depends_on:
       valkey:
         condition: service_healthy

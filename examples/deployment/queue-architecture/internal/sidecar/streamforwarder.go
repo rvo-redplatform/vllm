@@ -16,7 +16,14 @@ import (
 // ForwardStreaming makes a streaming HTTP call to the target endpoint and relays
 // each SSE chunk to a Redis Pub/Sub channel as it arrives. After the response body
 // is fully read, it publishes a final done sentinel message.
-func ForwardStreaming(ctx context.Context, rdb *redis.Client, job queue.Job, target string) error {
+//
+// ctx's deadline (see JobTimeout in consumer.go) governs the entire call,
+// including the time spent reading chunks from the response body: if ctx is
+// cancelled or its deadline is exceeded, the read loop below aborts and the
+// underlying connection is closed, which is what allows vLLM's own
+// with_cancellation disconnect-detection to abort the in-progress generation
+// instead of continuing to compute for a caller that has already given up.
+func ForwardStreaming(ctx context.Context, client *http.Client, rdb *redis.Client, job queue.Job, target string) error {
 	// Construct the full URL
 	url := target + job.Path
 
@@ -32,7 +39,6 @@ func ForwardStreaming(ctx context.Context, rdb *redis.Client, job queue.Job, tar
 	}
 
 	// Make the HTTP call
-	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to make HTTP request: %w", err)
