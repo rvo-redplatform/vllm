@@ -150,3 +150,38 @@ tests:
       - equal:
           path: spec.template.spec.initContainers[1].ports[0].containerPort
           value: 8080
+
+  - it: should inject RTR_ sidecar env and omit Redis names when sidecar is enabled
+    set:
+      sidecar:
+        enabled: true
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[1].name
+          value: sidecar
+      - equal:
+          path: spec.template.spec.containers[1].image
+          value: ghcr.io/rvo-redplatform/vllm-sidecar:latest
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RTR_NATS_URL
+            value: nats://nats:4222
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RTR_VLLM_TARGET
+            value: http://localhost:8000
+      - contains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: RTR_CONSUMER_NAME
+            value: vllm-sidecars
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: REDIS_ADDR
+      - notContains:
+          path: spec.template.spec.containers[1].env
+          content:
+            name: VLLM_TARGET

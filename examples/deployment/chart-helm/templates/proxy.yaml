@@ -28,27 +28,33 @@ spec:
           image: "{{ required "Required value 'proxy.image.repository' must be defined !" .Values.proxy.image.repository }}:{{ required "Required value 'proxy.image.tag' must be defined !" .Values.proxy.image.tag }}"
           imagePullPolicy: IfNotPresent
           env:
-            - name: REDIS_ADDR
-              value: {{ .Values.proxy.env.REDIS_ADDR | quote }}
-            - name: STREAM_NAME
-              value: {{ .Values.proxy.env.STREAM_NAME | quote }}
-            - name: LISTEN_PORT
-              value: {{ .Values.proxy.env.LISTEN_PORT | quote }}
-            {{- if .Values.proxy.env.MAX_BODY_BYTES }}
-            - name: MAX_BODY_BYTES
-              value: {{ .Values.proxy.env.MAX_BODY_BYTES | quote }}
+            - name: RTR_NATS_URL
+              value: {{ required "Required value 'proxy.env.RTR_NATS_URL' must be defined !" .Values.proxy.env.RTR_NATS_URL | quote }}
+            {{- if .Values.proxy.env.RTR_STREAM_NAME }}
+            - name: RTR_STREAM_NAME
+              value: {{ .Values.proxy.env.RTR_STREAM_NAME | quote }}
             {{- end }}
-            {{- if .Values.proxy.env.REQUEST_TIMEOUT }}
-            - name: REQUEST_TIMEOUT
-              value: {{ .Values.proxy.env.REQUEST_TIMEOUT | quote }}
+            {{- if .Values.proxy.env.RTR_STREAM_SUBJECT }}
+            - name: RTR_STREAM_SUBJECT
+              value: {{ .Values.proxy.env.RTR_STREAM_SUBJECT | quote }}
             {{- end }}
-            {{- if .Values.proxy.env.STREAM_TIMEOUT }}
-            - name: STREAM_TIMEOUT
-              value: {{ .Values.proxy.env.STREAM_TIMEOUT | quote }}
+            - name: RTR_PORT
+              value: {{ required "Required value 'proxy.env.RTR_PORT' must be defined !" .Values.proxy.env.RTR_PORT | quote }}
+            {{- if .Values.proxy.env.RTR_MAX_BODY_BYTES }}
+            - name: RTR_MAX_BODY_BYTES
+              value: {{ .Values.proxy.env.RTR_MAX_BODY_BYTES | quote }}
+            {{- end }}
+            {{- if .Values.proxy.env.RTR_REQUEST_TIMEOUT }}
+            - name: RTR_REQUEST_TIMEOUT
+              value: {{ .Values.proxy.env.RTR_REQUEST_TIMEOUT | quote }}
+            {{- end }}
+            {{- if .Values.proxy.env.RTR_STREAM_TIMEOUT }}
+            - name: RTR_STREAM_TIMEOUT
+              value: {{ .Values.proxy.env.RTR_STREAM_TIMEOUT | quote }}
             {{- end }}
           ports:
             - name: proxy-port
-              containerPort: {{ .Values.proxy.env.LISTEN_PORT | int }}
+              containerPort: {{ .Values.proxy.env.RTR_PORT | int }}
            {{- if .Values.proxy.resources }}
            resources:
              {{- toYaml .Values.proxy.resources | nindent 12 }}
