@@ -410,7 +410,7 @@ cat /tmp/hang_s.txt
 |---|---|
 | HTTP status | `200` (SSE headers written before sidecar timeout) |
 | Wall time | `3.009s`; connection unblocked |
-| SSE body | `data: {"body":"{\"error\":{\"message\":\"Request exceeded max processing time of 3s\",\"type\":\"timeout_error\",\"param\":null,\"code\":\"timeout\"}}","error":true,"status":504}` then `data: {"__done": true}` |
+| SSE body | OpenAI error frame then `data: [DONE]` (proxy translates the sidecar's internal `{"error":true,...}` envelope and `{"__done":true}` marker) |
 | Stream after | `messages=0`, `pending=0`, `ack_pending=0`, `redelivered=0` |
 | Sidecar log | `ERROR job timed out ... stream=true max_process_timeout=3s` |
 

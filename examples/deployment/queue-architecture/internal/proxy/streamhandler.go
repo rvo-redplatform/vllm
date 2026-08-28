@@ -79,23 +79,76 @@ func HandleStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 				continue
 			}
 
-			if done, ok := payload["__done"].(bool); ok && done {
-				fmt.Fprintf(w, "data: {\"__done\": true}\n\n")
-				flushSSE(w)
+			frame, terminal := frameInboxPayload(payload)
+			fmt.Fprint(w, frame)
+			flushSSE(w)
+			if terminal {
 				return
 			}
-
-			data, err := json.Marshal(payload)
-			if err != nil {
-				fmt.Fprintf(w, "data: {\"error\": \"marshal failed\"}\n\n")
-				flushSSE(w)
-				continue
-			}
-
-			fmt.Fprintf(w, "data: %s\n\n", string(data))
-			flushSSE(w)
 		}
 	}
+}
+
+// frameInboxPayload decides the SSE frame to write for one parsed inbox
+// message, and whether the caller should stop after writing it.
+//
+// The sidecar translates upstream "[DONE]" into an internal
+// {"__done": true} JSON marker because the inbox carries JSON payloads.
+// This function does the reverse translation on the way out, back into
+// the standard OpenAI "[DONE]" sentinel. Forwarding the raw internal
+// marker breaks strict OpenAI-compatible SSE clients (e.g. the Vercel AI
+// SDK), which reject it: it matches neither the chat-completion-chunk
+// schema nor an error object.
+func frameInboxPayload(payload map[string]interface{}) (frame string, terminal bool) {
+	if done, ok := payload["__done"].(bool); ok && done {
+		return "data: [DONE]\n\n", true
+	}
+
+	if isErr, ok := payload["error"].(bool); ok && isErr {
+		return frameErrorPayload(payload), false
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "data: {\"error\": \"marshal failed\"}\n\n", false
+	}
+	return fmt.Sprintf("data: %s\n\n", string(data)), false
+}
+
+// frameErrorPayload translates the sidecar's internal error transport shape
+// ({"error": true, "status": <code>, "body": "<raw upstream body>"}) into a
+// standard OpenAI-compatible SSE error frame. vLLM's own error bodies are
+// already OpenAI-style, so when the body parses as one it is forwarded
+// as-is. Otherwise a minimal error object is synthesized.
+func frameErrorPayload(payload map[string]interface{}) string {
+	bodyStr, _ := payload["body"].(string)
+
+	var upstream map[string]interface{}
+	if bodyStr != "" && json.Unmarshal([]byte(bodyStr), &upstream) == nil {
+		if _, hasErrorObj := upstream["error"].(map[string]interface{}); hasErrorObj {
+			if data, err := json.Marshal(upstream); err == nil {
+				return fmt.Sprintf("data: %s\n\n", string(data))
+			}
+		}
+	}
+
+	message := bodyStr
+	if message == "" {
+		message = "upstream error"
+	}
+	statusCode, _ := payload["status"].(float64) // json.Unmarshal decodes numbers as float64
+	synthesized := map[string]interface{}{
+		"error": map[string]interface{}{
+			"message": message,
+			"type":    "upstream_error",
+			"code":    int(statusCode),
+		},
+	}
+	data, err := json.Marshal(synthesized)
+	if err != nil {
+		return "data: {\"error\": {\"message\": \"upstream error\", \"type\": \"upstream_error\"}}\n\n"
+	}
+	return fmt.Sprintf("data: %s\n\n", string(data))
 }
 
 func headerMapFromRequest(r *http.Request) map[string]string {

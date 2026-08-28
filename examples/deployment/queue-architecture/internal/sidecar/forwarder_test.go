@@ -8,23 +8,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/queue"
+	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/model"
 )
 
-// TestForwardNonStreaming_RespectsContextDeadline guards against the bug
-// that caused a stuck production consumer to hold 5 pending stream messages
-// indefinitely with a climbing redelivery count: ForwardNonStreaming used to
-// construct its own http.Client{} with no Timeout, so a request to a vLLM
-// instance that stopped responding mid-request blocked forever, even though
-// the request itself carried a ctx. With a bounded ctx now honored, the
-// call must return promptly once the deadline passes -- not hang until the
-// server (which never responds) eventually does something.
 func TestForwardNonStreaming_RespectsContextDeadline(t *testing.T) {
 	unblock := make(chan struct{})
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Simulate a hung/stalled vLLM backend: never respond until the
-		// test unblocks it, well after the client should have given up.
 		<-unblock
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -36,10 +26,10 @@ func TestForwardNonStreaming_RespectsContextDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	job := queue.Job{JobID: "job-1", Method: "POST", Path: "/v1/chat/completions", Body: []byte(`{}`)}
+	job := model.Job{JobID: "job-1", Method: "POST", Path: "/v1/chat/completions", Body: []byte(`{}`)}
 
 	start := time.Now()
-	_, _, _, err := ForwardNonStreaming(ctx, http.DefaultClient, job, srv.URL)
+	_, _, _, err := ForwardNonStreaming(ctx, job, srv.URL)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -53,8 +43,6 @@ func TestForwardNonStreaming_RespectsContextDeadline(t *testing.T) {
 	}
 }
 
-// TestForwardNonStreaming_SucceedsWithinDeadline is the control case: a
-// normal, promptly-responding backend must still work exactly as before.
 func TestForwardNonStreaming_SucceedsWithinDeadline(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -66,9 +54,9 @@ func TestForwardNonStreaming_SucceedsWithinDeadline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	job := queue.Job{JobID: "job-2", Method: "POST", Path: "/v1/chat/completions", Body: []byte(`{}`)}
+	job := model.Job{JobID: "job-2", Method: "POST", Path: "/v1/chat/completions", Body: []byte(`{}`)}
 
-	status, _, body, err := ForwardNonStreaming(ctx, http.DefaultClient, job, srv.URL)
+	status, _, body, err := ForwardNonStreaming(ctx, job, srv.URL)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

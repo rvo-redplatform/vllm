@@ -2,13 +2,11 @@ package proxy
 
 import "testing"
 
-func TestFrameRedisPayload_DoneMarkerTranslatesToStandardSentinel(t *testing.T) {
-	// The bug this guards against: forwarding the sidecar's internal Redis
-	// transport marker verbatim instead of translating it back to the
-	// standard OpenAI "[DONE]" sentinel breaks strict OpenAI-compatible SSE
-	// clients (e.g. opencode's AI SDK), which reject {"__done":true} - it
-	// matches neither the chat-completion-chunk schema nor an error object.
-	frame, terminal := frameRedisPayload(map[string]interface{}{"__done": true})
+func TestFrameInboxPayload_DoneMarkerTranslatesToStandardSentinel(t *testing.T) {
+	// Forwarding the sidecar's internal inbox marker verbatim instead of
+	// translating it back to the standard OpenAI "[DONE]" sentinel breaks
+	// strict OpenAI-compatible SSE clients, which reject {"__done":true}.
+	frame, terminal := frameInboxPayload(map[string]interface{}{"__done": true})
 
 	if !terminal {
 		t.Fatalf("expected terminal=true for a done marker, got false")
@@ -18,12 +16,10 @@ func TestFrameRedisPayload_DoneMarkerTranslatesToStandardSentinel(t *testing.T) 
 	}
 }
 
-func TestFrameRedisPayload_DoneMarkerWithExtraFields(t *testing.T) {
-	// Confirmed live against the real deployed stack: Switchyard relabels
-	// the sidecar's bare {"__done": true} with an extra "model" field as it
-	// relays through - the proxy must still recognize it as the done
-	// marker regardless of what other fields are present.
-	frame, terminal := frameRedisPayload(map[string]interface{}{
+func TestFrameInboxPayload_DoneMarkerWithExtraFields(t *testing.T) {
+	// Relays may add fields (e.g. "model") onto the sidecar's
+	// {"__done": true}. The proxy must still recognize it as the done marker.
+	frame, terminal := frameInboxPayload(map[string]interface{}{
 		"__done": true,
 		"model":  "nemotron",
 	})
@@ -36,8 +32,8 @@ func TestFrameRedisPayload_DoneMarkerWithExtraFields(t *testing.T) {
 	}
 }
 
-func TestFrameRedisPayload_OrdinaryChunkIsNotTerminal(t *testing.T) {
-	frame, terminal := frameRedisPayload(map[string]interface{}{
+func TestFrameInboxPayload_OrdinaryChunkIsNotTerminal(t *testing.T) {
+	frame, terminal := frameInboxPayload(map[string]interface{}{
 		"id":      "chatcmpl-123",
 		"object":  "chat.completion.chunk",
 		"choices": []interface{}{},
@@ -54,11 +50,8 @@ func TestFrameRedisPayload_OrdinaryChunkIsNotTerminal(t *testing.T) {
 	}
 }
 
-func TestFrameRedisPayload_DoneFieldPresentButFalse(t *testing.T) {
-	// A payload that happens to have a "__done" key set to false (or any
-	// non-bool-true value) must be treated as an ordinary chunk, not the
-	// terminal marker.
-	frame, terminal := frameRedisPayload(map[string]interface{}{"__done": false})
+func TestFrameInboxPayload_DoneFieldPresentButFalse(t *testing.T) {
+	frame, terminal := frameInboxPayload(map[string]interface{}{"__done": false})
 
 	if terminal {
 		t.Fatalf("expected terminal=false when __done is false, got true")
@@ -68,22 +61,17 @@ func TestFrameRedisPayload_DoneFieldPresentButFalse(t *testing.T) {
 	}
 }
 
-func TestFrameRedisPayload_UpstreamErrorForwardsVLLMErrorObjectAsIs(t *testing.T) {
-	// Confirmed live against the real deployed stack: when vLLM rejects a
-	// request before producing any SSE data (e.g. tool_choice="auto"
-	// without --enable-auto-tool-choice), ForwardStreaming publishes
+func TestFrameInboxPayload_UpstreamErrorForwardsVLLMErrorObjectAsIs(t *testing.T) {
+	// When vLLM rejects a request before producing any SSE data,
+	// ForwardStreaming publishes
 	// {"error": true, "status": <code>, "body": "<raw vLLM error JSON>"}.
-	// The bug this guards against: forwarding that internal transport shape
-	// verbatim breaks strict OpenAI-compatible SSE clients (e.g. opencode's
-	// AI SDK) - a bare boolean "error" field matches neither the
-	// chat-completion-chunk schema nor a valid {"error": <object>} response.
-	// vLLM's own error body is already an OpenAI-style error object, so it
-	// should be forwarded as-is rather than re-wrapped.
-	frame, terminal := frameRedisPayload(map[string]interface{}{
+	// Forwarding that internal shape verbatim breaks strict OpenAI clients.
+	// vLLM's own error body is already OpenAI-style, so it is forwarded as-is.
+	frame, terminal := frameInboxPayload(map[string]interface{}{
 		"error":  true,
 		"status": float64(400),
 		"body":   `{"error":{"message":"\"auto\" tool choice requires --enable-auto-tool-choice and --tool-call-parser to be set","type":"BadRequestError","param":null,"code":400}}`,
-		"model":  "nemotron", // Switchyard adds this as it relays through, same as the done marker
+		"model":  "nemotron",
 	})
 
 	if terminal {
@@ -95,12 +83,8 @@ func TestFrameRedisPayload_UpstreamErrorForwardsVLLMErrorObjectAsIs(t *testing.T
 	}
 }
 
-func TestFrameRedisPayload_UpstreamErrorSynthesizesObjectFromPlainBody(t *testing.T) {
-	// If the upstream error body isn't a parseable OpenAI-style error
-	// object (e.g. a plain-text or unexpected-shape body), a minimal valid
-	// error object must still be synthesized so the client never receives
-	// the raw internal transport shape.
-	frame, terminal := frameRedisPayload(map[string]interface{}{
+func TestFrameInboxPayload_UpstreamErrorSynthesizesObjectFromPlainBody(t *testing.T) {
+	frame, terminal := frameInboxPayload(map[string]interface{}{
 		"error":  true,
 		"status": float64(502),
 		"body":   "upstream connection reset",
