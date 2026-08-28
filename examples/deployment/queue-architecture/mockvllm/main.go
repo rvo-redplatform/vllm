@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -77,10 +78,46 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if d, ok := hangDuration(r); ok {
+		if !sleepOrCancel(r.Context(), d) {
+			return
+		}
+	}
+
 	if req.Stream {
 		handleStreamingCompletion(w, r, &req)
 	} else {
 		handleNonStreamingCompletion(w, r, &req)
+	}
+}
+
+// hangDuration returns a hang delay from ?hang=<duration> or X-Mock-Hang.
+func hangDuration(r *http.Request) (time.Duration, bool) {
+	raw := r.URL.Query().Get("hang")
+	if raw == "" {
+		raw = r.Header.Get("X-Mock-Hang")
+	}
+	if raw == "" {
+		return 0, false
+	}
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, false
+	}
+	return d, true
+}
+
+// sleepOrCancel sleeps for d unless the request is cancelled first.
+// Returns false when cancelled so the handler can return without holding
+// the sidecar worker after a hard-cancel.
+func sleepOrCancel(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

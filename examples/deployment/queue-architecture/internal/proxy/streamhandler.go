@@ -11,6 +11,7 @@ import (
 
 	"github.com/nats-io/nats.go"
 	"github.com/oklog/ulid/v2"
+	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/apierror"
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/model"
 )
 
@@ -63,8 +64,7 @@ func HandleStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 			msg, err := sub.NextMsgWithContext(timeoutCtx)
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
-					fmt.Fprintf(w, "data: {\"error\": \"timeout\"}\n\n")
-					flushSSE(w)
+					writeTimeoutSSE(w, timeout)
 					return
 				}
 				fmt.Fprintf(w, "data: {\"error\": \"subscription error\"}\n\n")
@@ -112,4 +112,14 @@ func flushSSE(w http.ResponseWriter) {
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
 	}
+}
+
+func writeTimeoutSSE(w http.ResponseWriter, d time.Duration) {
+	body, err := apierror.NewTimeoutError(d).Bytes()
+	if err != nil {
+		fmt.Printf("failed to marshal timeout error: %v\n", err)
+		return
+	}
+	fmt.Fprintf(w, "data: %s\n\n", body)
+	flushSSE(w)
 }

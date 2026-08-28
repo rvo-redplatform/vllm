@@ -21,6 +21,7 @@ const (
 	capacityPollIntervalKey = "capacity-poll-interval"
 	healthCheckIntervalKey  = "health-check-interval"
 	maxDrainTimeoutKey      = "max-drain-timeout"
+	maxProcessTimeoutKey    = "max-process-timeout"
 
 	defaultStreamName    = "vllm_requests"
 	defaultStreamSubject = "vllm.requests"
@@ -33,4 +34,5 @@ const (
 	defaultCapacityPollInterval = 2 * time.Second
 	defaultHealthCheckInterval  = 5 * time.Second
 	defaultMaxDrainTimeout      = 660 * time.Second
+	defaultMaxProcessTimeout    = 10 * time.Minute
 )

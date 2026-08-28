@@ -294,6 +294,160 @@ wait
 
 ---
 
+## 4. Hung job hard-cancel at max-process-timeout
+
+**Expect:** A hung mockvllm request is cancelled at sidecar `RTR_MAX_PROCESS_TIMEOUT` (not the proxy 1h backstop). Client gets an OpenAI-compatible timeout error; the JetStream work message is ACKed (no poison leftover); the next healthy request succeeds.
+
+`mockvllm` hang hook (`mockvllm/main.go`): `?hang=<Go duration>` or header `X-Mock-Hang`. Sleep is cancel-aware so sidecar hard-cancel does not pin the worker. Healthy requests (no hang) still take ~1s.
+
+**Do not change** `docker-compose.yaml` `RTR_MAX_PROCESS_TIMEOUT: "10m"`. Override env for this verify only: sidecar process timeout **3s**, proxy wait **30s** (so a failed proxy path still fails fast, but sidecar 3s wins).
+
+### Setup (verify overlay; production default stays 10m)
+
+```bash
+cd examples/deployment/queue-architecture
+
+grep RTR_MAX_PROCESS_TIMEOUT docker-compose.yaml
+# RTR_MAX_PROCESS_TIMEOUT: "10m"
+
+cat > /tmp/compose.verify-timeout.yaml <<'EOF'
+services:
+  sidecar:
+    environment:
+      RTR_MAX_PROCESS_TIMEOUT: "3s"
+  proxy:
+    environment:
+      RTR_REQUEST_TIMEOUT: "30s"
+      RTR_STREAM_TIMEOUT: "30s"
+EOF
+
+docker compose down -v
+docker compose -f docker-compose.yaml -f /tmp/compose.verify-timeout.yaml up -d --build
+docker compose ps
+
+# confirm overlay took effect (not the 10m compose default)
+# distroless images have no `env` binary — inspect Config.Env
+docker inspect queue-architecture-sidecar-1 --format '{{range .Config.Env}}{{println .}}{{end}}' | grep RTR_MAX_PROCESS_TIMEOUT
+docker inspect proxy --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -E 'RTR_(REQUEST|STREAM)_TIMEOUT'
+```
+
+**Result: PASS** (overlay)
+
+| Check | Outcome |
+|---|---|
+| `docker-compose.yaml` | `RTR_MAX_PROCESS_TIMEOUT: "10m"` unchanged |
+| Sidecar inspect | `RTR_MAX_PROCESS_TIMEOUT=3s` |
+| Proxy inspect | `RTR_REQUEST_TIMEOUT=30s`, `RTR_STREAM_TIMEOUT=30s` |
+| Sidecar log | `max_process_timeout=3s` |
+
+Baseline (no hang; 1s mock delay < 3s process timeout):
+
+```bash
+curl -s -o /dev/null -w "HTTP %{http_code} time=%{time_total}\n" \
+  -X POST http://localhost:18001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mock-model","messages":[{"role":"user","content":"ping"}],"stream":false}'
+# HTTP 200 time=1.005454
+```
+
+JetStream snapshot (same helper as above).
+
+### 4a. Non-stream hang
+
+**Expect:** HTTP 504 + OpenAI timeout JSON in ~3s (not ~30s proxy, not 1h). Then `ack_pending=0`, `redelivered=0`.
+
+```bash
+curl -s -o /tmp/hang_ns.txt -w "HTTP %{http_code} time=%{time_total}\n" --max-time 20 \
+  -X POST "http://localhost:18001/v1/chat/completions?hang=30s" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mock-model","messages":[{"role":"user","content":"hang-ns"}],"stream":false}'
+cat /tmp/hang_ns.txt
+
+curl -s "http://localhost:8222/jsz?streams=1&consumers=1" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+for a in d.get('account_details', []):
+  for s in a.get('stream_detail', []):
+    st = s.get('state', {})
+    print('messages', st.get('messages'), 'bytes', st.get('bytes'))
+    for c in s.get('consumer_detail', []):
+      print('consumer', c.get('name'),
+            'pending', c.get('num_pending'),
+            'ack_pending', c.get('num_ack_pending'),
+            'redelivered', c.get('num_redelivered'))
+"
+```
+
+**Result: PASS**
+
+| Check | Outcome |
+|---|---|
+| HTTP status | `504` |
+| Wall time | `3.010s` (sidecar 3s, not proxy 30s / 1h) |
+| Body | `{"error":{"message":"Request exceeded max processing time of 3s","type":"timeout_error","param":null,"code":"timeout"}}` |
+| Stream after | `messages=0`, `pending=0`, `ack_pending=0`, `redelivered=0` |
+| Sidecar log | `ERROR job timed out ... stream=false max_process_timeout=3s` |
+
+Hung job hard-cancelled at process timeout; OpenAI timeout JSON returned; work message ACKed (WorkQueue retention deleted it).
+
+### 4b. Stream hang
+
+**Expect:** OpenAI timeout SSE (~3s), connection unblocks; queue empty.
+
+```bash
+curl -s -N -o /tmp/hang_s.txt -w "HTTP %{http_code} time=%{time_total}\n" --max-time 20 \
+  -X POST "http://localhost:18001/v1/chat/completions?hang=30s" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mock-model","messages":[{"role":"user","content":"hang-s"}],"stream":true}'
+cat /tmp/hang_s.txt
+
+# jsz snapshot (same python snippet as 4a)
+```
+
+**Result: PASS**
+
+| Check | Outcome |
+|---|---|
+| HTTP status | `200` (SSE headers written before sidecar timeout) |
+| Wall time | `3.009s`; connection unblocked |
+| SSE body | `data: {"body":"{\"error\":{\"message\":\"Request exceeded max processing time of 3s\",\"type\":\"timeout_error\",\"param\":null,\"code\":\"timeout\"}}","error":true,"status":504}` then `data: {"__done": true}` |
+| Stream after | `messages=0`, `pending=0`, `ack_pending=0`, `redelivered=0` |
+| Sidecar log | `ERROR job timed out ... stream=true max_process_timeout=3s` |
+
+### 4c. Next healthy request
+
+**Expect:** HTTP 200, valid mock completion; stream still empty.
+
+```bash
+curl -s -o /tmp/hang_followup.txt -w "HTTP %{http_code} time=%{time_total}\n" \
+  -X POST http://localhost:18001/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"mock-model","messages":[{"role":"user","content":"after-hang"}],"stream":false}'
+cat /tmp/hang_followup.txt
+```
+
+**Result: PASS**
+
+| Check | Outcome |
+|---|---|
+| HTTP status | `200` |
+| Wall time | `1.008s` |
+| Body | Valid mock completion (`Hello from mock vLLM`) |
+| Stream after | `messages=0`, `pending=0`, `ack_pending=0`, `redelivered=0` |
+
+Worker was not stuck after hang cancel; next job completed normally.
+
+Restore production compose defaults (10m) after this verify:
+
+```bash
+docker compose -f docker-compose.yaml up -d --force-recreate sidecar proxy
+# or: docker compose down && docker compose up -d
+```
+
+**Restore result:** sidecar `RTR_MAX_PROCESS_TIMEOUT=10m`; proxy has no `RTR_REQUEST_TIMEOUT` (CLI default 1h). `docker-compose.yaml` still `RTR_MAX_PROCESS_TIMEOUT: "10m"`.
+
+---
+
 ## Summary
 
 | Scenario | Status | Notes |
@@ -303,10 +457,11 @@ wait
 | Forward error ACK | **PASS** | 400 propagated; no stuck/redelivered messages |
 | Sidecar SIGKILL failover | **PASS** (attempt B) | Second sidecar completes after ~AckWait; not infinite retry |
 | Sidecar SIGKILL + paused backend | **PARTIAL** | Job stuck until sidecar restarted; client timed out |
+| Hung job hard-cancel (process timeout) | **PASS** | Non-stream 504 + OpenAI JSON ~3s; stream timeout SSE ~3s; ACK, no PEL leftover; next request 200 |
 
 ## Bugs / gaps
 
-1. **No mockvllm error injection** beyond invalid JSON → 400. Cannot easily test 502 forward failures without code changes.
+1. **mockvllm hang hook** (`?hang=<duration>` or `X-Mock-Hang`) exists for process-timeout tests. Still no 502/upstream-error injection beyond invalid JSON → 400.
 2. **Failover latency** is bounded by `AckWait` (30s) when the first sidecar dies without ACK; clients must tolerate that window (`REQUEST_TIMEOUT` default 1h covers it).
 3. **Attempt A:** If sidecar is killed and not replaced promptly while a message is `ack_pending`, the stream can hold one message until `AckWait` expires and a consumer is available — worth documenting for operators (ensure sidecar replicas / restart policy).
 
@@ -315,3 +470,5 @@ wait
 - `MAX_CONCURRENT_REQUESTS=0` → sidecar runs 1 worker (`workers <= 0` → 1)
 - Consumer `MaxDeliver=2`, `AckWait=30s` (`internal/queue/client.go`)
 - NATS `max_payload=10485760` (10 MiB) in `nats-server.conf`
+- Compose production default `RTR_MAX_PROCESS_TIMEOUT: "10m"` (verify overlay used 3s sidecar / 30s proxy only)
+- mockvllm hang: `?hang=<duration>` or `X-Mock-Hang` (cancel-aware)

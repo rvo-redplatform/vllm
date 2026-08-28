@@ -39,6 +39,7 @@ services:
       RTR_CONSUMER_NAME: "vllm-sidecars"
       RTR_VLLM_TARGET: "http://mockvllm:8000"
       RTR_MAX_CONCURRENCY: "0"
+      RTR_MAX_PROCESS_TIMEOUT: "10m"
     depends_on:
       nats:
         condition: service_healthy

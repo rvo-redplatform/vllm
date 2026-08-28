@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/oklog/ulid/v2"
+	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/apierror"
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/model"
 )
 
@@ -67,7 +68,7 @@ func HandleNonStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 		msg, err := sub.NextMsgWithContext(timeoutCtx)
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
-				http.Error(w, "request timeout", http.StatusGatewayTimeout)
+				writeTimeoutJSON(w, timeout)
 				return
 			}
 			http.Error(w, fmt.Sprintf("failed to wait for result: %v", err), http.StatusInternalServerError)
@@ -98,4 +99,17 @@ func enqueueHTTPStatus(err error) (int, string) {
 		return http.StatusRequestEntityTooLarge, msg
 	}
 	return http.StatusServiceUnavailable, msg
+}
+
+func writeTimeoutJSON(w http.ResponseWriter, d time.Duration) {
+	body, err := apierror.NewTimeoutError(d).Bytes()
+	if err != nil {
+		fmt.Printf("failed to marshal timeout error: %v\n", err)
+		return
+	}
+	w.Header().Set("Content-Type", apierror.JSONContentType)
+	w.WriteHeader(apierror.TimeoutHTTPStatus)
+	if _, err := w.Write(body); err != nil {
+		fmt.Printf("failed to write response body: %v\n", err)
+	}
 }

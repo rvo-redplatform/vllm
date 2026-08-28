@@ -34,6 +34,7 @@ func newSidecarCmd() *cobra.Command {
 	flags.Duration(capacityPollIntervalKey, defaultCapacityPollInterval, "Capacity poll interval (env: RTR_CAPACITY_POLL_INTERVAL)")
 	flags.Duration(healthCheckIntervalKey, defaultHealthCheckInterval, "vLLM health check interval (env: RTR_HEALTH_CHECK_INTERVAL)")
 	flags.Duration(maxDrainTimeoutKey, defaultMaxDrainTimeout, "Shutdown drain timeout (env: RTR_MAX_DRAIN_TIMEOUT)")
+	flags.Duration(maxProcessTimeoutKey, defaultMaxProcessTimeout, "Max per-job processing timeout (env: RTR_MAX_PROCESS_TIMEOUT)")
 
 	if err := viper.BindPFlags(flags); err != nil {
 		panic(fmt.Errorf("bind sidecar flags: %w", err))
@@ -52,6 +53,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	capacityPollInterval := viper.GetDuration(capacityPollIntervalKey)
 	healthCheckInterval := viper.GetDuration(healthCheckIntervalKey)
 	maxDrainTimeout := viper.GetDuration(maxDrainTimeoutKey)
+	maxProcessTimeout := viper.GetDuration(maxProcessTimeoutKey)
 
 	slog.InfoContext(cmd.Context(), "starting sidecar",
 		"nats_url", natsURL,
@@ -63,6 +65,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		"capacity_poll_interval", capacityPollInterval,
 		"health_check_interval", healthCheckInterval,
 		"max_drain_timeout", maxDrainTimeout,
+		"max_process_timeout", maxProcessTimeout,
 	)
 
 	shutdownCtx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
@@ -105,6 +108,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 			probeClient,
 			maxConcurrency,
 			capacityPollInterval,
+			maxProcessTimeout,
 		)
 		if err != nil {
 			errChan <- fmt.Errorf("consumer loop error: %w", err)
