@@ -97,6 +97,16 @@ spec:
         lagCount: {{ .Values.keda.redisStreams.lagCount | quote }}
         activationLagCount: {{ .Values.keda.redisStreams.activationLagCount | quote }}
     {{- end }}
+    {{- if ((.Values.keda.natsJetStream).enabled) }}
+    - type: nats-jetstream
+      metadata:
+        natsServerMonitoringEndpoint: {{ required "Value 'keda.natsJetStream.natsServerMonitoringEndpoint' must be defined when keda.natsJetStream.enabled=true !" .Values.keda.natsJetStream.natsServerMonitoringEndpoint | quote }}
+        account: {{ .Values.keda.natsJetStream.account | default "$G" | quote }}
+        stream: {{ required "Value 'keda.natsJetStream.stream' must be defined when keda.natsJetStream.enabled=true !" .Values.keda.natsJetStream.stream | quote }}
+        consumer: {{ required "Value 'keda.natsJetStream.consumer' must be defined when keda.natsJetStream.enabled=true !" .Values.keda.natsJetStream.consumer | quote }}
+        lagThreshold: {{ .Values.keda.natsJetStream.lagThreshold | quote }}
+        activationLagThreshold: {{ .Values.keda.natsJetStream.activationLagThreshold | quote }}
+    {{- end }}
     - type: prometheus
       metadata:
         serverAddress: {{ required "Value 'keda.prometheusServerAddress' must be defined when keda.enabled=true !" .Values.keda.prometheusServerAddress | quote }}

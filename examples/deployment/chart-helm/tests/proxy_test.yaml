@@ -1,0 +1,58 @@
+suite: test proxy
+templates:
+  - proxy.yaml
+release:
+  name: demo
+tests:
+  - it: should inject RTR_ proxy env and listen on RTR_PORT
+    set:
+      proxy:
+        enabled: true
+    documentIndex: 0
+    asserts:
+      - isKind:
+          of: Deployment
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: ghcr.io/rvo-redplatform/vllm-proxy:latest
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RTR_NATS_URL
+            value: nats://nats:4222
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RTR_PORT
+            value: "8080"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: RTR_STREAM_SUBJECT
+            value: vllm.requests
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: REDIS_ADDR
+      - notContains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: LISTEN_PORT
+      - equal:
+          path: spec.template.spec.containers[0].ports[0].containerPort
+          value: 8080
+
+  - it: should create a ClusterIP service for the proxy
+    set:
+      proxy:
+        enabled: true
+    documentIndex: 1
+    asserts:
+      - isKind:
+          of: Service
+      - equal:
+          path: spec.ports[0].port
+          value: 8080
+      - equal:
+          path: spec.ports[0].targetPort
+          value: proxy-port

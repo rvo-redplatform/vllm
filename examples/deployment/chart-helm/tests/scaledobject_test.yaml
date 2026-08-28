@@ -1,0 +1,47 @@
+suite: test keda scaledobject
+templates:
+  - scaledobject.yaml
+release:
+  name: demo
+tests:
+  - it: should add a nats-jetstream trigger when natsJetStream is enabled
+    set:
+      keda:
+        enabled: true
+        prometheusServerAddress: "http://prometheus-server.vllm.svc.cluster.local:80"
+        natsJetStream:
+          enabled: true
+          natsServerMonitoringEndpoint: "nats.nats.svc.cluster.local:8222"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - equal:
+          path: spec.triggers[0].type
+          value: nats-jetstream
+      - equal:
+          path: spec.triggers[0].metadata.natsServerMonitoringEndpoint
+          value: nats.nats.svc.cluster.local:8222
+      - equal:
+          path: spec.triggers[0].metadata.stream
+          value: vllm_requests
+      - equal:
+          path: spec.triggers[0].metadata.consumer
+          value: vllm-sidecars
+      - equal:
+          path: spec.triggers[1].type
+          value: prometheus
+
+  - it: should not render redis-streams or nats-jetstream when both are disabled
+    set:
+      keda:
+        enabled: true
+        prometheusServerAddress: "http://prometheus-server.vllm.svc.cluster.local:80"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: spec.triggers
+          count: 1
+      - equal:
+          path: spec.triggers[0].type
+          value: prometheus
