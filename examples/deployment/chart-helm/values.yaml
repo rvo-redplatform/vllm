@@ -317,14 +317,11 @@ sidecar:
      # -- Interval for reclaiming idle requests (optional, default 30s)
     - name: RECLAIM_INTERVAL
       value: "30s"
-    # -- Per-job forward-to-vLLM timeout (optional, default 8m). Must stay
-    # comfortably below IDLE_THRESHOLD: every job should time out and get
-    # acked on its own well before the reclaim loop would otherwise need to
-    # notice it, so a hung/stuck forward can't be endlessly reclaimed back
-    # onto the same consumer with no progress. On timeout, the client
-    # receives a 504 and vLLM's in-progress generation is aborted.
-    - name: JOB_TIMEOUT
-      value: "8m"
+    # -- Maximum process timeout (sidecar, default 10m). Acts as a job kill switch.
+    # Must be <= RTR_MAX_DRAIN_TIMEOUT and <= Kubernetes terminationGracePeriodSeconds.
+    # Proxy REQUEST_TIMEOUT / STREAM_TIMEOUT must be >= this value.
+    - name: RTR_MAX_PROCESS_TIMEOUT
+      value: "10m"
 
 # -- Standalone proxy Deployment+Service configuration (optional, disabled by default)
 proxy:
@@ -348,9 +345,11 @@ proxy:
     LISTEN_PORT: "8080"
     # -- Maximum request body size in bytes (optional, default 10 MiB)
     MAX_BODY_BYTES: ""
-    # -- Request timeout duration (optional, default 30s)
+    # -- Request timeout duration (optional; empty uses CLI default 1h).
+    # Must be >= sidecar RTR_MAX_PROCESS_TIMEOUT.
     REQUEST_TIMEOUT: ""
-    # -- Stream timeout duration (optional, default 5m)
+    # -- Stream timeout duration (optional; empty uses CLI default 1h).
+    # Must be >= sidecar RTR_MAX_PROCESS_TIMEOUT.
     STREAM_TIMEOUT: ""
   # -- Service port for the proxy
   servicePort: 8080
