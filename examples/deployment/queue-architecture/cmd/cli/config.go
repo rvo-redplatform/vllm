@@ -10,6 +10,7 @@ const (
 
 	// Proxy-only flags.
 	portKey           = "port"
+	metricsPortKey    = "metrics-port"
 	maxBodyBytesKey   = "max-body-bytes"
 	requestTimeoutKey = "request-timeout"
 	streamTimeoutKey  = "stream-timeout"
@@ -31,6 +32,7 @@ const (
 	defaultMaxBodyBytes         = 10 << 20 // 10 MiB
 	defaultRequestTimeout       = time.Hour
 	defaultStreamTimeout        = time.Hour
+	defaultMetricsPort          = "9100"
 	defaultCapacityPollInterval = 2 * time.Second
 	defaultHealthCheckInterval  = 5 * time.Second
 	defaultMaxDrainTimeout      = 660 * time.Second

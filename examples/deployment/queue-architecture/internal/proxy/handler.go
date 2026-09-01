@@ -12,6 +12,7 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 	"github.com/oklog/ulid/v2"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/apierror"
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/model"
 )
@@ -26,7 +27,7 @@ type Result struct {
 // HandleNonStreaming returns an HTTP handler that processes non-streaming requests.
 // It reads the request into a Job, subscribes on a NATS inbox, enqueues the job,
 // waits for one inbox reply, and writes the response back to the client.
-func HandleNonStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
+func HandleNonStreaming(prod Producer, timeout time.Duration, upstreamProcessing *prometheus.HistogramVec) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx := r.Context()
 
@@ -62,10 +63,15 @@ func HandleNonStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 			return
 		}
 
+		processingStart := time.Now()
+
 		timeoutCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 
 		msg, err := sub.NextMsgWithContext(timeoutCtx)
+
+		processingDuration := time.Since(processingStart)
+		upstreamProcessing.WithLabelValues(classifyErrorType(err)).Observe(processingDuration.Seconds())
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
 				writeTimeoutJSON(w, timeout)
@@ -99,6 +105,19 @@ func enqueueHTTPStatus(err error) (int, string) {
 		return http.StatusRequestEntityTooLarge, msg
 	}
 	return http.StatusServiceUnavailable, msg
+}
+
+func classifyErrorType(err error) string {
+	if err == nil {
+		return "success"
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
+		return "timeout"
+	}
+	if errors.Is(err, nats.ErrMaxPayload) || errors.Is(err, jetstream.ErrMaxBytesExceeded) {
+		return "oversized"
+	}
+	return "user"
 }
 
 func writeTimeoutJSON(w http.ResponseWriter, d time.Duration) {

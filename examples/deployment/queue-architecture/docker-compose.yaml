@@ -40,6 +40,8 @@ services:
       RTR_VLLM_TARGET: "http://mockvllm:8000"
       RTR_MAX_CONCURRENCY: "0"
       RTR_MAX_PROCESS_TIMEOUT: "10m"
+    ports:
+      - "29100:9100"
     depends_on:
       nats:
         condition: service_healthy
@@ -56,6 +58,7 @@ services:
       RTR_STREAM_NAME: "vllm_requests"
       RTR_PORT: "8001"
     ports:
+      - "19100:9100"
       - "18001:8001"
     depends_on:
       nats:

@@ -4,12 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os/signal"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/metrics"
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/queue"
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/sidecar"
 	"github.com/spf13/cobra"
@@ -30,6 +33,7 @@ func newSidecarCmd() *cobra.Command {
 	flags := cmd.Flags()
 	flags.String(vllmTargetKey, "", "vLLM upstream URL (env: RTR_VLLM_TARGET)")
 	flags.String(consumerNameKey, defaultConsumerName, "JetStream consumer name (env: RTR_CONSUMER_NAME)")
+	flags.String(metricsPortKey, defaultMetricsPort, "Metrics HTTP listen port (env: RTR_METRICS_PORT)")
 	flags.Int(maxConcurrencyKey, defaultMaxConcurrency, "Max concurrent requests (env: RTR_MAX_CONCURRENCY)")
 	flags.Duration(capacityPollIntervalKey, defaultCapacityPollInterval, "Capacity poll interval (env: RTR_CAPACITY_POLL_INTERVAL)")
 	flags.Duration(healthCheckIntervalKey, defaultHealthCheckInterval, "vLLM health check interval (env: RTR_HEALTH_CHECK_INTERVAL)")
@@ -49,6 +53,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	streamSubject := viper.GetString(streamSubjectKey)
 	vllmTarget := viper.GetString(vllmTargetKey)
 	consumerName := viper.GetString(consumerNameKey)
+	metricsPort := viper.GetString(metricsPortKey)
 	maxConcurrency := viper.GetInt(maxConcurrencyKey)
 	capacityPollInterval := viper.GetDuration(capacityPollIntervalKey)
 	healthCheckInterval := viper.GetDuration(healthCheckIntervalKey)
@@ -61,12 +66,16 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		"stream_subject", streamSubject,
 		"vllm_target", vllmTarget,
 		"consumer_name", consumerName,
+		"metrics_port", metricsPort,
 		"max_concurrency", maxConcurrency,
 		"capacity_poll_interval", capacityPollInterval,
 		"health_check_interval", healthCheckInterval,
 		"max_drain_timeout", maxDrainTimeout,
 		"max_process_timeout", maxProcessTimeout,
 	)
+
+	// Initialize metrics registry and register sidecar metric families
+	sidecar.InitMetrics()
 
 	shutdownCtx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -78,12 +87,11 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		queue.WithStreamName(streamName),
 		queue.WithStreamSubject(streamSubject),
 	)
-	consumer := queue.NewConsumer(qClient, queue.WithConsumerName(consumerName))
-	err := consumer.Connect(cmd.Context())
-	if err != nil {
-		return fmt.Errorf("error connecting to consumer: %w", err)
-	}
-	defer consumer.Close()
+	qConsumer := queue.NewConsumer(qClient)
+	qConsumer.Connect(cmd.Context())
+	sidecarMetrics := sidecar.NewSidecarMetrics()
+	consumer := sidecar.NewConsumer(qConsumer, sidecarMetrics)
+	defer qConsumer.Close()
 
 	probeClient := &http.Client{Timeout: 5 * time.Second}
 
@@ -91,17 +99,29 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		cmd.Context(),
 		fmt.Sprintf("Waiting for VLLM_TARGET=%s to become healthy before consuming from the queue...", vllmTarget),
 	)
-	err = sidecar.WaitForHealthy(shutdownCtx, probeClient, vllmTarget, healthCheckInterval)
+	err := sidecar.WaitForHealthy(shutdownCtx, probeClient, vllmTarget, healthCheckInterval)
 	if err != nil {
-		return fmt.Errorf("gave up waiting for vllm to become healthy: &w", err)
+		return fmt.Errorf("gave up waiting for vllm to become healthy: %w", err)
 	}
+
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
+	metricsAddr := net.JoinHostPort("", metricsPort)
+	metricsServer := &http.Server{Addr: metricsAddr, Handler: metricsMux}
+
+	go func() {
+		slog.InfoContext(cmd.Context(), "starting metrics server", "address", metricsAddr)
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			slog.ErrorContext(cmd.Context(), "metrics server error", "err", err)
+		}
+	}()
 
 	errChan := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := sidecar.NewConsumer(consumer).ConsumerLoop(
+		err := consumer.ConsumerLoop(
 			shutdownCtx,
 			workCtx,
 			vllmTarget,
