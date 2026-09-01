@@ -415,3 +415,7 @@ livenessProbe:
 labels:
   environment: "test"
   release: "test"
+  # App name for OpenTelemetry Collector autodiscovery
+  app.kubernetes.io/name: "vllm"
+  # Enable OTel metric scraping from this pod
+  otel.io/enabled: "true"
