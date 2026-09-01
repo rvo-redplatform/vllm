@@ -35,6 +35,7 @@ func newSidecarCmd() *cobra.Command {
 	flags.String(consumerNameKey, defaultConsumerName, "JetStream consumer name (env: RTR_CONSUMER_NAME)")
 	flags.String(metricsPortKey, defaultMetricsPort, "Metrics HTTP listen port (env: RTR_METRICS_PORT)")
 	flags.Int(maxConcurrencyKey, defaultMaxConcurrency, "Max concurrent requests (env: RTR_MAX_CONCURRENCY)")
+	flags.Int(maxAckPendingKey, defaultMaxAckPending, "JetStream max outstanding unacked messages; -1 is unlimited (env: RTR_MAX_ACK_PENDING)")
 	flags.Duration(capacityPollIntervalKey, defaultCapacityPollInterval, "Capacity poll interval (env: RTR_CAPACITY_POLL_INTERVAL)")
 	flags.Duration(healthCheckIntervalKey, defaultHealthCheckInterval, "vLLM health check interval (env: RTR_HEALTH_CHECK_INTERVAL)")
 	flags.Duration(maxDrainTimeoutKey, defaultMaxDrainTimeout, "Shutdown drain timeout (env: RTR_MAX_DRAIN_TIMEOUT)")
@@ -55,6 +56,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	consumerName := viper.GetString(consumerNameKey)
 	metricsPort := viper.GetString(metricsPortKey)
 	maxConcurrency := viper.GetInt(maxConcurrencyKey)
+	maxAckPending := viper.GetInt(maxAckPendingKey)
 	capacityPollInterval := viper.GetDuration(capacityPollIntervalKey)
 	healthCheckInterval := viper.GetDuration(healthCheckIntervalKey)
 	maxDrainTimeout := viper.GetDuration(maxDrainTimeoutKey)
@@ -68,6 +70,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		"consumer_name", consumerName,
 		"metrics_port", metricsPort,
 		"max_concurrency", maxConcurrency,
+		"max_ack_pending", maxAckPending,
 		"capacity_poll_interval", capacityPollInterval,
 		"health_check_interval", healthCheckInterval,
 		"max_drain_timeout", maxDrainTimeout,
@@ -87,7 +90,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		queue.WithStreamName(streamName),
 		queue.WithStreamSubject(streamSubject),
 	)
-	qConsumer := queue.NewConsumer(qClient)
+	qConsumer := queue.NewConsumer(qClient, queue.WithMaxAckPending(maxAckPending))
 	qConsumer.Connect(cmd.Context())
 	sidecarMetrics := sidecar.NewSidecarMetrics()
 	consumer := sidecar.NewConsumer(qConsumer, sidecarMetrics)

@@ -13,7 +13,7 @@ import (
 
 const (
 	defaultConsumerName  = "vllm-sidecars"
-	defaultMaxAckPending = 2
+	defaultMaxAckPending = -1
 	defaultMaxDeliver    = 2
 	defaultAckWait       = 30 * time.Second
 	defaultAckPolicy     = jetstream.AckExplicitPolicy
