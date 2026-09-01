@@ -151,7 +151,14 @@ func currentLoad(ctx context.Context, client *http.Client, target string) (float
 // itself is treated as unhealthy rather than blindly claiming work it
 // can't handle: this re-enters the same WaitForHealthy loop used at
 // startup and blocks until vLLM genuinely recovers (or ctx is cancelled).
-func waitForCapacity(ctx context.Context, client *http.Client, target string, maxConcurrent int, pollInterval time.Duration) error {
+func waitForCapacity(
+	ctx context.Context,
+	client *http.Client,
+	metrics *SidecarMetrics,
+	target string,
+	maxConcurrent int,
+	pollInterval time.Duration,
+) error {
 	if maxConcurrent <= 0 {
 		return nil
 	}
@@ -189,6 +196,8 @@ func waitForCapacity(ctx context.Context, client *http.Client, target string, ma
 			consecutiveFailures = 0
 			continue
 		}
+
+		metrics.CapacityUsage.Set(load)
 		consecutiveFailures = 0
 
 		if load < float64(maxConcurrent) {

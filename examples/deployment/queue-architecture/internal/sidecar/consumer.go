@@ -24,13 +24,46 @@ type ConsumerClient interface {
 }
 
 type Consumer struct {
-	client ConsumerClient
+	client  ConsumerClient
+	metrics *SidecarMetrics
+
+	// runChain is the composed middleware chain wrapping the core runJob
+	// call. Built once in NewConsumer so we don't re-allocate the chain on
+	// every single job.
+	runChain ProcessJobFunc
 }
 
-func NewConsumer(client ConsumerClient) *Consumer {
-	return &Consumer{
-		client: client,
+// NewConsumer wires a Consumer with its metrics and builds the job-processing
+// middleware chain once. metrics is a required dependency -- no default or
+// fallback is provided.
+func NewConsumer(client ConsumerClient, metrics *SidecarMetrics) *Consumer {
+	c := &Consumer{
+		client:  client,
+		metrics: metrics,
 	}
+
+	// core is the bare runJob call: ctx already carries the per-job
+	// processing deadline applied by processJob before invoking the chain.
+	core := func(ctx context.Context, fetched queue.Message, target string, maxProcessTimeout time.Duration) jobOutcome {
+		return c.runJob(ctx, fetched, target)
+	}
+
+	// Composition order, outer to inner:
+	//   WithInFlight            -- outermost: tracks the full call window,
+	//                              including any middleware overhead below it.
+	//   WithProcessingDuration  -- times/observes the call, closest to the
+	//                              actual runJob work so latency reflects
+	//                              forward time, not other middleware.
+	//   WithJobCounters         -- innermost: increments the Processed/Failed/
+	//                              ErrorsTotal counters based on exactly what
+	//                              runJob returned, right next to the call.
+	c.runChain = ChainJobMiddleware(core,
+		WithInFlight(metrics),
+		WithProcessingDuration(metrics),
+		WithJobCounters(metrics),
+	)
+
+	return c
 }
 
 type jobOutcome struct {
@@ -40,9 +73,10 @@ type jobOutcome struct {
 	err     error
 }
 
-// processJob forwards a pulled job to vLLM, publishes the reply on the proxy
-// inbox, and ACKs the JetStream work message. Reply publish failures are logged
-// but never block ACK (orphan replies are acceptable when the proxy is gone).
+// processJob forwards a pulled job to vLLM (via the metrics-instrumented
+// middleware chain), publishes the reply on the proxy inbox, and ACKs the
+// JetStream work message. Reply publish failures are logged but never block
+// ACK (orphan replies are acceptable when the proxy is gone).
 //
 // workCtx must stay live through the whole call: processCtx is a bounded
 // per-job deadline that hard-cancels the in-flight vLLM forward, but Ack is
@@ -55,7 +89,9 @@ func (c *Consumer) processJob(workCtx context.Context, fetched queue.Message, ta
 	// 1. times out
 	// 2. errors
 	// 3. finishes
-	out := c.runJob(processCtx, fetched, target)
+	// Metrics (in-flight gauge, processing duration, processed/failed/error
+	// counters) are all recorded by the middleware chain around this call.
+	out := c.runChain(processCtx, fetched, target, maxProcessTimeout)
 
 	switch {
 	case out.err == nil:
@@ -272,7 +308,7 @@ func (c *Consumer) runWorker(
 		default:
 		}
 
-		if err := waitForCapacity(claimCtx, httpClient, target, maxConcurrent, capacityPollInterval); err != nil {
+		if err := waitForCapacity(claimCtx, httpClient, c.metrics, target, maxConcurrent, capacityPollInterval); err != nil {
 			if claimCtx.Err() != nil {
 				return nil
 			}
@@ -280,6 +316,7 @@ func (c *Consumer) runWorker(
 		}
 
 		fetched, err := c.client.Fetch(claimCtx, sidecarFetchBatchSize)
+		c.metrics.FetchSize.Set(float64(len(fetched)))
 		if err != nil {
 			if claimCtx.Err() != nil {
 				return nil

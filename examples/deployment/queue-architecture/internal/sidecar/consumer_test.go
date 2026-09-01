@@ -94,7 +94,18 @@ func (m *fakeJSMsg) Nak() error {
 	return nil
 }
 
+// TestProcessJob_Timeout tests that processJob correctly handles timeouts,
+// publishes the right replies, and ACKs the message. The test only updates
+// the NewConsumer constructor call to pass a *SidecarMetrics; the assertions
+// about Ack/Nak/mail behavior remain identical.
 func TestProcessJob_Timeout(t *testing.T) {
+	// NewSidecarMetrics registers each metric family against the shared
+	// metrics.Registry via promauto, and registration is NOT idempotent --
+	// calling it twice for the same metric name panics with "duplicate
+	// metrics collector registration attempted". So we build metrics once
+	// here and share it across both subtests instead of once per subtest.
+	metrics := NewSidecarMetrics()
+
 	tests := []struct {
 		name   string
 		stream bool
@@ -128,7 +139,8 @@ func TestProcessJob_Timeout(t *testing.T) {
 				Msg: &fakeJSMsg{probe},
 			}
 
-			c := NewConsumer(&fakeClient{probe})
+			c := NewConsumer(&fakeClient{probe}, metrics)
+
 			runProcessJob(t, c, workCtx, fetched, srv.URL, timeout)
 
 			select {
