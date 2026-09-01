@@ -19,6 +19,7 @@ const (
 	consumerNameKey         = "consumer-name"
 	vllmTargetKey           = "vllm-target"
 	maxConcurrencyKey       = "max-concurrency"
+	maxAckPendingKey        = "max-ack-pending"
 	capacityPollIntervalKey = "capacity-poll-interval"
 	healthCheckIntervalKey  = "health-check-interval"
 	maxDrainTimeoutKey      = "max-drain-timeout"
@@ -29,6 +30,7 @@ const (
 	defaultConsumerName  = "vllm-sidecars"
 
 	defaultMaxConcurrency       = 2
+	defaultMaxAckPending        = -1
 	defaultMaxBodyBytes         = 10 << 20 // 10 MiB
 	defaultRequestTimeout       = time.Hour
 	defaultStreamTimeout        = time.Hour
