@@ -22,6 +22,9 @@ spec:
         {{- if and .Values.sidecar.enabled .Values.sidecar.labels }}
         {{- toYaml .Values.sidecar.labels | nindent 8 }}
         {{- end }}
+        {{- with .Values.vllm.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -88,7 +91,7 @@ spec:
           {{- end }}
           ports:
             - name: metrics
-              containerPort: {{ .Values.sidecar.metricsPort | default 9100 | int }}
+              containerPort: {{ .Values.sidecar.metricsPort | default 8000 | int }}
         {{- end }}
 
         {{- with .Values.extraContainers }}

@@ -431,10 +431,13 @@ livenessProbe:
 # Used as Deployment spec.selector.matchLabels (immutable after create)
 # AND as the base pod labels. Do not add scrape/OTel identity keys here --
 # they would change the selector on existing releases. Put those on
-# sidecar.labels / proxy.podLabels / podLabels (pod template only).
+# sidecar.labels / proxy.podLabels / podLabels / vllm.podLabels (pod template only).
 labels:
   environment: "test"
   release: "test"
 
 # -- Extra labels on the vLLM worker pod template only (not spec.selector).
 podLabels: {}
+
+vllm:
+  podLabels: {}
