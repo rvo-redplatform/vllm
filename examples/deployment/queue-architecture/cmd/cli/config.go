@@ -18,7 +18,8 @@ const (
 	// Sidecar-only flags.
 	consumerNameKey         = "consumer-name"
 	vllmTargetKey           = "vllm-target"
-	maxConcurrencyKey       = "max-concurrency"
+	workerPoolSizeKey       = "worker-pool-size"
+	disableCapacityGateKey  = "disable-capacity-gate"
 	maxAckPendingKey        = "max-ack-pending"
 	capacityPollIntervalKey = "capacity-poll-interval"
 	healthCheckIntervalKey  = "health-check-interval"
@@ -29,7 +30,16 @@ const (
 	defaultStreamSubject = "vllm.requests"
 	defaultConsumerName  = "vllm-sidecars"
 
-	defaultMaxConcurrency       = 2
+	// defaultWorkerPoolSize just bounds how many jobs can be in flight to
+	// vLLM at once before the capacity gate (see health.go waitForCapacity)
+	// has a chance to trip -- it is NOT a safety ceiling. The gate is what
+	// protects vLLM: every worker blocks the instant vLLM's own scheduler
+	// reports capacity pressure, regardless of pool size. A generous
+	// default is safe here; it only affects burst-fill speed and
+	// redundant /metrics polling overhead while blocked, never whether
+	// vLLM's real backpressure is respected.
+	defaultWorkerPoolSize       = 32
+	defaultDisableCapacityGate  = false
 	defaultMaxAckPending        = -1
 	defaultMaxBodyBytes         = 10 << 20 // 10 MiB
 	defaultRequestTimeout       = time.Hour

@@ -11,14 +11,24 @@ import (
 	"time"
 )
 
-// vLLM's own Prometheus metric names that reflect its real-time engine load.
-// num_requests_running = actively being computed on the GPU right now.
-// num_requests_waiting = accepted by vLLM but queued internally, not yet
-// running (vLLM has its own internal admission queue independent of ours).
-const (
-	metricNumRequestsRunning = "vllm:num_requests_running"
-	metricNumRequestsWaiting = "vllm:num_requests_waiting"
-)
+// metricNumRequestsWaitingByReason is vLLM's own per-reason breakdown of
+// requests it is holding in its internal admission queue rather than
+// running right now. We only care about the "capacity" reason: it fires
+// exactly when vLLM's continuous-batching scheduler cannot admit another
+// sequence into its current KV-cache budget. This is vLLM's own real
+// backpressure signal -- not an external, hand-picked concurrency ceiling.
+//
+// The "deferred" reason (LoRA budget, KV transfer, blocked status) is
+// deliberately excluded: those are transient scheduling artifacts
+// unrelated to whether this vLLM instance is actually out of room, and
+// treating them as capacity pressure would cause the sidecar to back off
+// for the wrong reason.
+const metricNumRequestsWaitingByReason = "vllm:num_requests_waiting_by_reason"
+
+// capacityReasonLabel is the label value on metricNumRequestsWaitingByReason
+// that indicates genuine scheduler capacity pressure (as opposed to
+// "deferred").
+const capacityReasonLabel = `reason="capacity"`
 
 // WaitForHealthy polls target's /health endpoint until it returns HTTP 200,
 // or ctx is cancelled.
@@ -75,12 +85,18 @@ func WaitForHealthy(ctx context.Context, client *http.Client, target string, pol
 	}
 }
 
-// currentLoad scrapes target's /metrics endpoint and returns the sum of
-// vllm:num_requests_running and vllm:num_requests_waiting -- vLLM's own
-// real-time count of requests it is actively processing or has internally
-// queued. Scraped fresh on every call so capacity decisions reflect the
-// engine's true current state rather than an assumed/hardcoded ceiling.
-func currentLoad(ctx context.Context, client *http.Client, target string) (float64, error) {
+// capacityPressure scrapes target's /metrics endpoint and returns vLLM's own
+// vllm:num_requests_waiting_by_reason{reason="capacity"} gauge value --
+// vLLM's real-time count of requests it cannot currently admit into its
+// KV-cache budget. Scraped fresh on every call so the backoff decision
+// reflects the engine's true current state, not an assumed/hardcoded
+// ceiling.
+//
+// A return value of 0 means vLLM has room right now. Any value > 0 means
+// vLLM's own scheduler is already holding back requests -- i.e. this
+// instance is genuinely full, independent of however many requests the
+// sidecar itself has in flight.
+func capacityPressure(ctx context.Context, client *http.Client, target string) (float64, error) {
 	metricsURL := target + "/metrics"
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metricsURL, nil)
 	if err != nil {
@@ -97,52 +113,63 @@ func currentLoad(ctx context.Context, client *http.Client, target string) (float
 		return 0, fmt.Errorf("metrics endpoint returned status %d", resp.StatusCode)
 	}
 
-	var total float64
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		for _, name := range []string{metricNumRequestsRunning, metricNumRequestsWaiting} {
-			if !strings.HasPrefix(line, name) {
-				continue
-			}
-			// Prometheus text exposition format: "<metric_name>{labels} <value>"
-			// or "<metric_name> <value>" with no labels. The value is always
-			// the last whitespace-separated field on the line.
-			fields := strings.Fields(line)
-			if len(fields) < 2 {
-				continue
-			}
-			val, parseErr := strconv.ParseFloat(fields[len(fields)-1], 64)
-			if parseErr != nil {
-				continue
-			}
-			total += val
+		if !strings.HasPrefix(line, metricNumRequestsWaitingByReason) {
+			continue
 		}
+		// Prometheus text exposition format:
+		// "<metric_name>{labels} <value>". Only the "capacity" reason
+		// line matters here; the "deferred" reason line is skipped.
+		if !strings.Contains(line, capacityReasonLabel) {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		val, parseErr := strconv.ParseFloat(fields[len(fields)-1], 64)
+		if parseErr != nil {
+			continue
+		}
+		return val, nil
 	}
 	if err := scanner.Err(); err != nil {
 		return 0, fmt.Errorf("scan metrics response: %w", err)
 	}
 
-	return total, nil
+	// Metric line not found at all (e.g. older vLLM without this gauge).
+	// Treat as "no pressure reported" rather than erroring the whole
+	// scrape -- callers that want strict enforcement should monitor for
+	// this via logs/metrics rather than the gate wedging shut.
+	return 0, nil
 }
 
-// waitForCapacity blocks, polling target's real-time load via currentLoad,
-// until vLLM's combined running+waiting request count is below
-// maxConcurrent, or ctx is cancelled.
+// waitForCapacity blocks, polling target's real-time scheduler pressure via
+// capacityPressure, until vLLM itself reports it has room to admit more
+// work (num_requests_waiting_by_reason{reason="capacity"} == 0), or ctx is
+// cancelled.
 //
-// This is the gate that makes the sidecar's claim/forward decision aware of
-// its host vLLM instance's actual real-time capacity, instead of blindly
-// claiming and forwarding every message it reads regardless of whether
-// vLLM has room to make timely progress on it. If vLLM already reports
-// being at or above the configured ceiling, a message is deliberately left
-// unclaimed in the stream (visible to KEDA's lag-based scaling metric)
-// rather than pulled and immediately queued up behind other in-flight work.
+// This is a binary gate driven entirely by vLLM's own admission-control
+// signal -- not a static concurrency ceiling. The sidecar keeps pulling and
+// forwarding work as fast as it can for as long as vLLM reports zero
+// capacity pressure; the instant vLLM's scheduler starts holding back
+// requests for lack of KV-cache budget, every worker on this sidecar stops
+// claiming new messages and leaves them in the shared JetStream stream. In
+// a multi-replica deployment (one sidecar per vLLM pod, all sharing the
+// same durable consumer), those messages are then picked up by whichever
+// other replica has room -- and this node resumes claiming work again the
+// moment its own pressure clears. This also keeps NATS JetStream's lag
+// metric (which KEDA's nats-jetstream trigger scales on) a true measure of
+// unclaimed backlog across the whole fleet, instead of being drained into
+// a per-pod internal queue where it's invisible to autoscaling.
 //
-// maxConcurrent <= 0 disables this gate entirely (always returns
-// immediately) -- useful for local/dev environments without a real vLLM
+// capacityGateDisabled (target's caller-controlled escape hatch) skips this
+// entirely -- useful for local/dev environments without a real vLLM
 // /metrics endpoint, or if an operator wants to opt out.
 //
 // A single metrics-scrape failure is tolerated (retried after pollInterval)
@@ -156,10 +183,10 @@ func waitForCapacity(
 	client *http.Client,
 	metrics *SidecarMetrics,
 	target string,
-	maxConcurrent int,
+	capacityGateDisabled bool,
 	pollInterval time.Duration,
 ) error {
-	if maxConcurrent <= 0 {
+	if capacityGateDisabled {
 		return nil
 	}
 
@@ -173,7 +200,7 @@ func waitForCapacity(
 		default:
 		}
 
-		load, err := currentLoad(ctx, client, target)
+		pressure, err := capacityPressure(ctx, client, target)
 		if err != nil {
 			consecutiveFailures++
 			if consecutiveFailures < maxConsecutiveFailures {
@@ -197,14 +224,14 @@ func waitForCapacity(
 			continue
 		}
 
-		metrics.CapacityUsage.Set(load)
+		metrics.CapacityUsage.Set(pressure)
 		consecutiveFailures = 0
 
-		if load < float64(maxConcurrent) {
+		if pressure == 0 {
 			return nil
 		}
 
-		slog.InfoContext(ctx, fmt.Sprintf("vLLM at capacity (running+waiting=%.0f >= max=%d), holding off on claiming next message", load, maxConcurrent))
+		slog.InfoContext(ctx, fmt.Sprintf("vLLM reports capacity pressure (waiting_by_reason[capacity]=%.0f), holding off on claiming next message", pressure))
 
 		select {
 		case <-ctx.Done():

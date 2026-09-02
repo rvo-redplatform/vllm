@@ -24,7 +24,11 @@ type SidecarMetrics struct {
 	// set on every Fetch call in runWorker.
 	FetchSize prometheus.Gauge
 
-	// CapacityUsage is vLLM's running+waiting load, scraped by currentLoad.
+	// CapacityUsage is vLLM's own reported scheduler capacity pressure
+	// (vllm:num_requests_waiting_by_reason{reason="capacity"}), scraped by
+	// capacityPressure. 0 means vLLM has room; >0 means vLLM's own
+	// admission control is holding back requests and this sidecar is
+	// backing off.
 	CapacityUsage prometheus.Gauge
 
 	// JobsInFlight is the number of jobs currently being processed by this
@@ -64,7 +68,7 @@ func NewSidecarMetrics() *SidecarMetrics {
 		CapacityUsage: promauto.With(metrics.Registry).NewGauge(prometheus.GaugeOpts{
 			Namespace: "vllm_sidecar",
 			Name:      "capacity_usage",
-			Help:      "Current capacity usage of the sidecar (0.0 to 1.0).",
+			Help:      "vLLM's own reported scheduler capacity pressure (num_requests_waiting_by_reason{reason=\"capacity\"}). 0 = vLLM has room; >0 = vLLM is backpressuring, this sidecar is holding off on claiming new work.",
 		}),
 		JobsInFlight: promauto.With(metrics.Registry).NewGauge(prometheus.GaugeOpts{
 			Namespace: "vllm_sidecar",

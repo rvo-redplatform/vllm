@@ -251,9 +251,25 @@ func (c *Consumer) publishStreamError(replyTo string, status int, body string) {
 	}
 }
 
-// ConsumerLoop runs up to maxConcurrent independent worker goroutines, each
-// looping: gate on vLLM's real-time load, pull one job from JetStream,
-// process it, repeat.
+// ConsumerLoop runs workerPoolSize independent worker goroutines, each
+// looping: gate on vLLM's real-time scheduler capacity pressure, pull one
+// job from JetStream, process it, repeat.
+//
+// workerPoolSize and the capacity gate are deliberately independent
+// concerns:
+//   - workerPoolSize just bounds how many jobs this sidecar can have
+//     in flight to vLLM at once *before* the gate has a chance to trip --
+//     i.e. burst-fill speed and (at capacityGateDisabled) redundant
+//     /metrics polling overhead. It is not a safety ceiling.
+//   - The capacity gate (waitForCapacity, see health.go) is what actually
+//     protects vLLM: every worker, regardless of pool size, blocks the
+//     instant vLLM's own scheduler reports capacity pressure
+//     (num_requests_waiting_by_reason{reason="capacity"} > 0), and every
+//     worker resumes the instant that pressure clears. Because that gate
+//     is correct and binary, workerPoolSize can safely be set generously
+//     (e.g. 100) without risking overloading vLLM -- it only changes how
+//     quickly the sidecar can fill available capacity, never whether it
+//     respects vLLM's real backpressure.
 //
 // GRACEFUL SHUTDOWN / SCALE-DOWN: this takes two separate contexts, not one.
 //   - shutdownCtx is cancelled on SIGTERM (pod being terminated -- scale-down,
@@ -269,11 +285,12 @@ func (c *Consumer) ConsumerLoop(
 	shutdownCtx, workCtx context.Context,
 	target string,
 	httpClient *http.Client,
-	maxConcurrent int,
+	workerPoolSize int,
+	capacityGateDisabled bool,
 	capacityPollInterval time.Duration,
 	maxProcessTimeout time.Duration,
 ) error {
-	workers := maxConcurrent
+	workers := workerPoolSize
 	if workers <= 0 {
 		workers = 1
 	}
@@ -282,7 +299,7 @@ func (c *Consumer) ConsumerLoop(
 	for i := 0; i < workers; i++ {
 		workerID := i
 		g.Go(func() error {
-			return c.runWorker(claimCtx, workCtx, workerID, target, httpClient, maxConcurrent, capacityPollInterval, maxProcessTimeout)
+			return c.runWorker(claimCtx, workCtx, workerID, target, httpClient, capacityGateDisabled, capacityPollInterval, maxProcessTimeout)
 		})
 	}
 
@@ -297,7 +314,7 @@ func (c *Consumer) runWorker(
 	workerID int,
 	target string,
 	httpClient *http.Client,
-	maxConcurrent int,
+	capacityGateDisabled bool,
 	capacityPollInterval time.Duration,
 	maxProcessTimeout time.Duration,
 ) error {
@@ -308,7 +325,7 @@ func (c *Consumer) runWorker(
 		default:
 		}
 
-		if err := waitForCapacity(claimCtx, httpClient, c.metrics, target, maxConcurrent, capacityPollInterval); err != nil {
+		if err := waitForCapacity(claimCtx, httpClient, c.metrics, target, capacityGateDisabled, capacityPollInterval); err != nil {
 			if claimCtx.Err() != nil {
 				return nil
 			}

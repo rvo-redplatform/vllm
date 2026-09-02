@@ -323,7 +323,12 @@ sidecar:
   # with cluster DNS for NATS (e.g. nats://nats.nats.svc.cluster.local:4222).
   # Do not set a per-pod CONSUMER_NAME -- JetStream WorkQueue uses one shared
   # durable (RTR_CONSUMER_NAME) that every sidecar replica pulls.
-  # RTR_MAX_CONCURRENCY is omitted so the CLI default (2) applies for real vLLM.
+  # RTR_WORKER_POOL_SIZE is omitted so the CLI default (32) applies. This
+  # only bounds in-flight burst-fill speed to vLLM, NOT a safety ceiling --
+  # correctness comes from vLLM's own capacity gate
+  # (vllm:num_requests_waiting_by_reason{reason="capacity"}), which every
+  # worker respects regardless of pool size. A generous value (even 100) is
+  # safe here.
   env:
     # -- NATS server URL (required)
     - name: RTR_NATS_URL
