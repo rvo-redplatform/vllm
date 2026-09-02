@@ -47,7 +47,7 @@ for a in d.get('account_details', []):
 
 **Expect:** All 100 clients get HTTP 200 with a valid mock completion; JetStream absorbs the burst (pending > 0 mid-run) then drains to empty with no redeliveries.
 
-Compose runs **1 sidecar worker** (`RTR_MAX_CONCURRENCY=0`) and mockvllm sleeps **1s** per non-stream request, so wall time is ~100s. Override with `N=50` for a quicker pass.
+Compose runs **1 sidecar worker with the capacity gate disabled** (`RTR_WORKER_POOL_SIZE=1`, `RTR_DISABLE_CAPACITY_GATE=true` -- mockvllm exposes no `/metrics` endpoint) and mockvllm sleeps **1s** per non-stream request, so wall time is ~100s. Override with `N=50` for a quicker pass.
 
 Fresh stack recommended (baseline 200 first).
 

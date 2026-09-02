@@ -34,7 +34,8 @@ func newSidecarCmd() *cobra.Command {
 	flags.String(vllmTargetKey, "", "vLLM upstream URL (env: RTR_VLLM_TARGET)")
 	flags.String(consumerNameKey, defaultConsumerName, "JetStream consumer name (env: RTR_CONSUMER_NAME)")
 	flags.String(metricsPortKey, defaultMetricsPort, "Metrics HTTP listen port (env: RTR_METRICS_PORT)")
-	flags.Int(maxConcurrencyKey, defaultMaxConcurrency, "Max concurrent requests (env: RTR_MAX_CONCURRENCY)")
+	flags.Int(workerPoolSizeKey, defaultWorkerPoolSize, "Number of concurrent worker goroutines pulling/forwarding jobs. Bounds in-flight burst-fill speed only -- NOT a safety ceiling; vLLM's own capacity gate (see disable-capacity-gate) is what protects vLLM regardless of this value (env: RTR_WORKER_POOL_SIZE)")
+	flags.Bool(disableCapacityGateKey, defaultDisableCapacityGate, "Disable the vLLM-capacity-driven backoff gate entirely (env: RTR_DISABLE_CAPACITY_GATE). Only for local/dev environments without a real vLLM /metrics endpoint.")
 	flags.Int(maxAckPendingKey, defaultMaxAckPending, "JetStream max outstanding unacked messages; -1 is unlimited (env: RTR_MAX_ACK_PENDING)")
 	flags.Duration(capacityPollIntervalKey, defaultCapacityPollInterval, "Capacity poll interval (env: RTR_CAPACITY_POLL_INTERVAL)")
 	flags.Duration(healthCheckIntervalKey, defaultHealthCheckInterval, "vLLM health check interval (env: RTR_HEALTH_CHECK_INTERVAL)")
@@ -55,7 +56,8 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 	vllmTarget := viper.GetString(vllmTargetKey)
 	consumerName := viper.GetString(consumerNameKey)
 	metricsPort := viper.GetString(metricsPortKey)
-	maxConcurrency := viper.GetInt(maxConcurrencyKey)
+	workerPoolSize := viper.GetInt(workerPoolSizeKey)
+	disableCapacityGate := viper.GetBool(disableCapacityGateKey)
 	maxAckPending := viper.GetInt(maxAckPendingKey)
 	capacityPollInterval := viper.GetDuration(capacityPollIntervalKey)
 	healthCheckInterval := viper.GetDuration(healthCheckIntervalKey)
@@ -69,7 +71,8 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		"vllm_target", vllmTarget,
 		"consumer_name", consumerName,
 		"metrics_port", metricsPort,
-		"max_concurrency", maxConcurrency,
+		"worker_pool_size", workerPoolSize,
+		"disable_capacity_gate", disableCapacityGate,
 		"max_ack_pending", maxAckPending,
 		"capacity_poll_interval", capacityPollInterval,
 		"health_check_interval", healthCheckInterval,
@@ -129,7 +132,8 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 			workCtx,
 			vllmTarget,
 			probeClient,
-			maxConcurrency,
+			workerPoolSize,
+			disableCapacityGate,
 			capacityPollInterval,
 			maxProcessTimeout,
 		)

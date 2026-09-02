@@ -102,9 +102,10 @@ func TestProcessJob_Timeout(t *testing.T) {
 	// NewSidecarMetrics registers each metric family against the shared
 	// metrics.Registry via promauto, and registration is NOT idempotent --
 	// calling it twice for the same metric name panics with "duplicate
-	// metrics collector registration attempted". So we build metrics once
-	// here and share it across both subtests instead of once per subtest.
-	metrics := NewSidecarMetrics()
+	// metrics collector registration attempted". testMetrics() (see
+	// health_test.go) builds it once per test binary and shares it across
+	// every test in this package.
+	metrics := testMetrics()
 
 	tests := []struct {
 		name   string
