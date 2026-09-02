@@ -18,6 +18,9 @@ spec:
       labels:
         {{- include "chart.labels" . | nindent 8 }}
         app: proxy
+        {{- with .Values.proxy.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
       {{- with .Values.proxy.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -55,6 +58,8 @@ spec:
           ports:
             - name: proxy-port
               containerPort: {{ .Values.proxy.env.RTR_PORT | int }}
+            - name: metrics
+              containerPort: {{ .Values.proxy.metricsPort | default 9100 | int }}
            {{- if .Values.proxy.resources }}
            resources:
              {{- toYaml .Values.proxy.resources | nindent 12 }}

@@ -41,6 +41,31 @@ tests:
       - equal:
           path: spec.template.spec.containers[0].ports[0].containerPort
           value: 8080
+      - equal:
+          path: spec.template.spec.containers[0].ports[1].containerPort
+          value: 9100
+
+  - it: should add proxy podLabels to the pod template but not the selector
+    set:
+      proxy:
+        enabled: true
+        podLabels:
+          app.kubernetes.io/name: vllm-proxy
+          otel.io/enabled: "true"
+    documentIndex: 0
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            environment: test
+            release: test
+            app: proxy
+      - equal:
+          path: spec.template.metadata.labels["app.kubernetes.io/name"]
+          value: vllm-proxy
+      - equal:
+          path: spec.template.metadata.labels["otel.io/enabled"]
+          value: "true"
 
   - it: should create a ClusterIP service for the proxy
     set:
