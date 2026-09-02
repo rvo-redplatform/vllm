@@ -185,3 +185,26 @@ tests:
           path: spec.template.spec.containers[1].env
           content:
             name: VLLM_TARGET
+
+  - it: should add sidecar labels to the pod template but not the selector
+    set:
+      sidecar:
+        enabled: true
+        labels:
+          app.kubernetes.io/name: vllm-sidecar
+          otel.io/enabled: "true"
+    asserts:
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            environment: test
+            release: test
+      - equal:
+          path: spec.template.metadata.labels["app.kubernetes.io/name"]
+          value: vllm-sidecar
+      - equal:
+          path: spec.template.metadata.labels["otel.io/enabled"]
+          value: "true"
+      - equal:
+          path: spec.template.spec.containers[1].ports[0].containerPort
+          value: 9100

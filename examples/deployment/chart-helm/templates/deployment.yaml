@@ -16,6 +16,12 @@ spec:
     metadata:
       labels:
         {{- include "chart.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+        {{- if and .Values.sidecar.enabled .Values.sidecar.labels }}
+        {{- toYaml .Values.sidecar.labels | nindent 8 }}
+        {{- end }}
       {{- with .Values.podAnnotations }}
       annotations:
         {{- toYaml . | nindent 8 }}
@@ -80,6 +86,9 @@ spec:
           env:
             {{- toYaml .Values.sidecar.env | nindent 12 }}
           {{- end }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.sidecar.metricsPort | default 9100 | int }}
         {{- end }}
 
         {{- with .Values.extraContainers }}
