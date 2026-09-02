@@ -190,7 +190,7 @@ tests:
     set:
       sidecar:
         enabled: true
-        labels:
+        podLabels:
           app.kubernetes.io/name: vllm-sidecar
           otel.io/enabled: "true"
     asserts:

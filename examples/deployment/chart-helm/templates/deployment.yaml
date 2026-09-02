@@ -19,8 +19,8 @@ spec:
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
-        {{- if and .Values.sidecar.enabled .Values.sidecar.labels }}
-        {{- toYaml .Values.sidecar.labels | nindent 8 }}
+        {{- if and .Values.sidecar.enabled .Values.sidecar.podLabels }}
+        {{- toYaml .Values.sidecar.podLabels | nindent 8 }}
         {{- end }}
       {{- with .Values.podAnnotations }}
       annotations:

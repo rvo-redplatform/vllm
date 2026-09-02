@@ -309,7 +309,7 @@ sidecar:
   # -- Extra labels on the vLLM worker *pod template only* (not
   # spec.selector). Sidecar shares that pod, so OTel autodiscovery identity
   # for the sidecar (app.kubernetes.io/name, otel.io/enabled) goes here.
-  labels: {}
+  podLabels: {}
   # -- Sidecar Prometheus /metrics listen port (RTR_METRICS_PORT default)
   metricsPort: 9100
   # -- Image configuration for the sidecar
@@ -431,7 +431,7 @@ livenessProbe:
 # Used as Deployment spec.selector.matchLabels (immutable after create)
 # AND as the base pod labels. Do not add scrape/OTel identity keys here --
 # they would change the selector on existing releases. Put those on
-# sidecar.labels / proxy.podLabels / podLabels (pod template only).
+# sidecar.podLabels / proxy.podLabels / podLabels (pod template only).
 labels:
   environment: "test"
   release: "test"
