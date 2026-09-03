@@ -29,7 +29,7 @@ spec:
       containers:
         - name: "proxy"
           image: "{{ required "Required value 'proxy.image.repository' must be defined !" .Values.proxy.image.repository }}:{{ required "Required value 'proxy.image.tag' must be defined !" .Values.proxy.image.tag }}"
-          imagePullPolicy: IfNotPresent
+          imagePullPolicy: Always
           env:
             - name: RTR_NATS_URL
               value: {{ required "Required value 'proxy.env.RTR_NATS_URL' must be defined !" .Values.proxy.env.RTR_NATS_URL | quote }}

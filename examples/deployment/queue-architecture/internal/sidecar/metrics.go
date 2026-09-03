@@ -42,6 +42,17 @@ type SidecarMetrics struct {
 	// JobErrorsTotal counts job outcomes by classified error_type
 	// ("success", "timeout", "user").
 	JobOutcomesTotal *prometheus.CounterVec
+
+	// CircuitState is the admission circuit state (0=unknown, 1=open,
+	// 2=half_open, 3=closed).
+	CircuitState prometheus.Gauge
+
+	// CircuitTransitionsTotal counts circuit state transitions.
+	CircuitTransitionsTotal *prometheus.CounterVec
+
+	// CircuitProbeErrorsTotal counts probe failures reported by the
+	// admission circuit observer.
+	CircuitProbeErrorsTotal prometheus.Counter
 }
 
 // NewSidecarMetrics builds and registers all sidecar metric families against
@@ -91,6 +102,23 @@ func NewSidecarMetrics() *SidecarMetrics {
 		},
 			[]string{"error_type"},
 		),
+		CircuitState: promauto.With(metrics.Registry).NewGauge(prometheus.GaugeOpts{
+			Namespace: "vllm_sidecar",
+			Name:      "circuit_state",
+			Help:      "Admission circuit state (0=unknown, 1=open, 2=half_open, 3=closed).",
+		}),
+		CircuitTransitionsTotal: promauto.With(metrics.Registry).NewCounterVec(prometheus.CounterOpts{
+			Namespace: "vllm_sidecar",
+			Name:      "circuit_transitions_total",
+			Help:      "Total number of admission circuit state transitions.",
+		},
+			[]string{"from", "to", "reason"},
+		),
+		CircuitProbeErrorsTotal: promauto.With(metrics.Registry).NewCounter(prometheus.CounterOpts{
+			Namespace: "vllm_sidecar",
+			Name:      "circuit_probe_errors_total",
+			Help:      "Total number of admission circuit probe failures.",
+		}),
 	}
 }
 

@@ -135,6 +135,7 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 			workerPoolSize,
 			disableCapacityGate,
 			capacityPollInterval,
+			healthCheckInterval,
 			maxProcessTimeout,
 		)
 		if err != nil {

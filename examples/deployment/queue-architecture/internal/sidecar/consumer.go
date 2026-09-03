@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/apierror"
+	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/circuit"
 	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/queue"
 	"golang.org/x/sync/errgroup"
 )
@@ -252,31 +253,24 @@ func (c *Consumer) publishStreamError(replyTo string, status int, body string) {
 }
 
 // ConsumerLoop runs workerPoolSize independent worker goroutines, each
-// looping: gate on vLLM's real-time scheduler capacity pressure, pull one
-// job from JetStream, process it, repeat.
+// looping: wait on the shared admission circuit, pull one job from JetStream,
+// process it, repeat.
 //
-// workerPoolSize and the capacity gate are deliberately independent
+// workerPoolSize and the admission circuit are deliberately independent
 // concerns:
-//   - workerPoolSize just bounds how many jobs this sidecar can have
-//     in flight to vLLM at once *before* the gate has a chance to trip --
-//     i.e. burst-fill speed and (at capacityGateDisabled) redundant
-//     /metrics polling overhead. It is not a safety ceiling.
-//   - The capacity gate (waitForCapacity, see health.go) is what actually
-//     protects vLLM: every worker, regardless of pool size, blocks the
-//     instant vLLM's own scheduler reports capacity pressure
-//     (num_requests_waiting_by_reason{reason="capacity"} > 0), and every
-//     worker resumes the instant that pressure clears. Because that gate
-//     is correct and binary, workerPoolSize can safely be set generously
-//     (e.g. 100) without risking overloading vLLM -- it only changes how
-//     quickly the sidecar can fill available capacity, never whether it
-//     respects vLLM's real backpressure.
+//   - workerPoolSize bounds how many jobs this sidecar can have in flight
+//     to vLLM at once before the circuit trips -- burst-fill speed only,
+//     not a safety ceiling.
+//   - The admission circuit (circuit.Run + WaitReady) is what protects
+//     vLLM: one observer goroutine polls vLLM's /metrics; every worker
+//     blocks on WaitReady when the circuit is Open.
 //
 // GRACEFUL SHUTDOWN / SCALE-DOWN: this takes two separate contexts, not one.
 //   - shutdownCtx is cancelled on SIGTERM (pod being terminated -- scale-down,
 //     node drain, etc). It gates every FETCH decision: checked explicitly
-//     before each pull attempt, and threaded into waitForCapacity/queue.Fetch
-//     so a worker blocked waiting for capacity or for a new message unblocks
-//     and stops immediately when shutdown begins.
+//     before each pull attempt, and threaded into WaitReady/queue.Fetch so
+//     a worker blocked on the circuit or for a new message unblocks and
+//     stops immediately when shutdown begins.
 //   - workCtx is NOT cancelled by shutdown. Once a message has actually been
 //     fetched, processJob runs on workCtx, so an in-flight job (already
 //     consuming GPU time) always runs to completion -- forwarded, reply
@@ -288,6 +282,7 @@ func (c *Consumer) ConsumerLoop(
 	workerPoolSize int,
 	capacityGateDisabled bool,
 	capacityPollInterval time.Duration,
+	healthCheckInterval time.Duration,
 	maxProcessTimeout time.Duration,
 ) error {
 	workers := workerPoolSize
@@ -295,11 +290,33 @@ func (c *Consumer) ConsumerLoop(
 		workers = 1
 	}
 
+	capCircuit := c.newCapacityCircuit(
+		target,
+		httpClient,
+		capacityGateDisabled,
+		capacityPollInterval,
+		healthCheckInterval,
+	)
+
+	slog.Info("starting consume loop",
+		"workers", workers,
+		"capacity_gate_disabled", capacityGateDisabled,
+		"poll_interval", capacityPollInterval,
+		"healthcheck_interval", healthCheckInterval,
+	)
+
 	g, claimCtx := errgroup.WithContext(shutdownCtx)
+
+	if !capacityGateDisabled {
+		g.Go(func() error {
+			return capCircuit.Run(claimCtx)
+		})
+	}
+
 	for i := 0; i < workers; i++ {
 		workerID := i
 		g.Go(func() error {
-			return c.runWorker(claimCtx, workCtx, workerID, target, httpClient, capacityGateDisabled, capacityPollInterval, maxProcessTimeout)
+			return c.runWorker(claimCtx, workCtx, workerID, target, capCircuit, maxProcessTimeout)
 		})
 	}
 
@@ -309,13 +326,49 @@ func (c *Consumer) ConsumerLoop(
 	return shutdownCtx.Err()
 }
 
-func (c *Consumer) runWorker(
-	claimCtx, workCtx context.Context,
-	workerID int,
+func (c *Consumer) newCapacityCircuit(
 	target string,
 	httpClient *http.Client,
 	capacityGateDisabled bool,
 	capacityPollInterval time.Duration,
+	healthCheckInterval time.Duration,
+) *circuit.Circuit {
+	observer := NewCircuitMetricsObserver(c.metrics)
+
+	if capacityGateDisabled {
+		return circuit.New(
+			circuit.NoOpProbe,
+			circuit.NoOpRecover,
+			circuit.WithObserver(observer),
+			circuit.WithInitialState(circuit.CircuitClosed),
+		)
+	}
+
+	probe := func(ctx context.Context) (circuit.CapacitySignal, error) {
+		load, err := capacityPressure(ctx, httpClient, target)
+		if err != nil {
+			return circuit.CapacitySignal{}, err
+		}
+		return circuit.CapacitySignal{HasCapacity: load == 0, Load: load}, nil
+	}
+	recoverFn := func(ctx context.Context) error {
+		return WaitForHealthy(ctx, httpClient, target, healthCheckInterval)
+	}
+
+	return circuit.New(
+		probe,
+		recoverFn,
+		circuit.WithObserver(observer),
+		circuit.WithProbeInterval(capacityPollInterval),
+		circuit.WithInitialState(circuit.CircuitOpen),
+	)
+}
+
+func (c *Consumer) runWorker(
+	claimCtx, workCtx context.Context,
+	workerID int,
+	target string,
+	capCircuit *circuit.Circuit,
 	maxProcessTimeout time.Duration,
 ) error {
 	for {
@@ -325,11 +378,11 @@ func (c *Consumer) runWorker(
 		default:
 		}
 
-		if err := waitForCapacity(claimCtx, httpClient, c.metrics, target, capacityGateDisabled, capacityPollInterval); err != nil {
-			if claimCtx.Err() != nil {
-				return nil
-			}
-			return err
+		if err := capCircuit.WaitReady(claimCtx); err != nil {
+			slog.ErrorContext(claimCtx, "error waiting for capacity",
+				"err", err,
+			)
+			continue
 		}
 
 		fetched, err := c.client.Fetch(claimCtx, sidecarFetchBatchSize)

@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/rvo-redplatform/vllm/examples/deployment/queue-architecture/internal/circuit"
 )
 
 // testMetrics is shared across all tests in this package because
@@ -93,13 +95,12 @@ func TestCapacityPressure_MissingMetricTreatedAsNoPressure(t *testing.T) {
 	}
 }
 
-// TestWaitForCapacity_BlocksThenUnblocksOnPressureClear is the core
-// regression test for the binary gate: it must block for as long as vLLM
-// reports capacity pressure, and return as soon as pressure clears -- with
-// no dependency on any external concurrency count.
-func TestWaitForCapacity_BlocksThenUnblocksOnPressureClear(t *testing.T) {
+// TestCapacityCircuit_WaitReadyBlocksThenUnblocks is the core regression
+// test for admission gating: WaitReady must block while vLLM reports
+// capacity pressure and return once pressure clears.
+func TestCapacityCircuit_WaitReadyBlocksThenUnblocks(t *testing.T) {
 	var pressure atomic.Int64
-	pressure.Store(1) // start under pressure
+	pressure.Store(1)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -107,40 +108,81 @@ func TestWaitForCapacity_BlocksThenUnblocksOnPressureClear(t *testing.T) {
 	}))
 	defer srv.Close()
 
+	probe := func(ctx context.Context) (circuit.CapacitySignal, error) {
+		load, err := capacityPressure(ctx, srv.Client(), srv.URL)
+		if err != nil {
+			return circuit.CapacitySignal{}, err
+		}
+		return circuit.CapacitySignal{HasCapacity: load == 0, Load: load}, nil
+	}
+
+	capCircuit := circuit.New(
+		probe,
+		circuit.NoOpRecover,
+		circuit.WithProbeInterval(20*time.Millisecond),
+		circuit.WithOpenAfter(1),
+		circuit.WithCloseAfter(1),
+		circuit.WithInitialState(circuit.CircuitOpen),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go func() { _ = capCircuit.Run(ctx) }()
+
 	done := make(chan error, 1)
 	go func() {
-		done <- waitForCapacity(context.Background(), srv.Client(), testMetrics(), srv.URL, false, 20*time.Millisecond)
+		done <- capCircuit.WaitReady(context.Background())
 	}()
 
-	// Should still be blocked shortly after starting -- vLLM is under
-	// pressure.
 	select {
 	case err := <-done:
-		t.Fatalf("waitForCapacity returned early (err=%v) while vLLM was still under capacity pressure", err)
+		t.Fatalf("WaitReady returned early (err=%v) while vLLM was still under capacity pressure", err)
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// Clear pressure; waitForCapacity must unblock promptly.
 	pressure.Store(0)
 
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("waitForCapacity: unexpected error after pressure cleared: %v", err)
+			t.Fatalf("WaitReady: unexpected error after pressure cleared: %v", err)
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("waitForCapacity did not unblock after vLLM capacity pressure cleared")
+		t.Fatal("WaitReady did not unblock after vLLM capacity pressure cleared")
 	}
 }
 
-func TestWaitForCapacity_DisabledGateReturnsImmediately(t *testing.T) {
-	// No server at all -- if the gate were not actually disabled, this
-	// would hang/error trying to scrape an unreachable target.
+func TestCapacityCircuit_DisabledGateWaitReadyImmediate(t *testing.T) {
+	capCircuit := circuit.New(
+		circuit.NoOpProbe,
+		circuit.NoOpRecover,
+		circuit.WithInitialState(circuit.CircuitClosed),
+	)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	err := waitForCapacity(ctx, http.DefaultClient, testMetrics(), "http://127.0.0.1:1", true, 10*time.Millisecond)
-	if err != nil {
-		t.Fatalf("waitForCapacity with capacityGateDisabled=true: unexpected error: %v", err)
+	if err := capCircuit.WaitReady(ctx); err != nil {
+		t.Fatalf("WaitReady with disabled gate: unexpected error: %v", err)
+	}
+}
+
+func TestNewConsumer_DisabledCapacityCircuitWaitReady(t *testing.T) {
+	c := NewConsumer(&fakeClient{&jobProbe{t: t, workCtx: context.Background()}}, testMetrics())
+
+	capCircuit := c.newCapacityCircuit(
+		"http://127.0.0.1:1",
+		http.DefaultClient,
+		true,
+		10*time.Millisecond,
+		10*time.Millisecond,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	if err := capCircuit.WaitReady(ctx); err != nil {
+		t.Fatalf("disabled capacity circuit WaitReady: unexpected error: %v", err)
 	}
 }
