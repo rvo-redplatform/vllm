@@ -31,13 +31,8 @@ const (
 	defaultConsumerName  = "vllm-sidecars"
 
 	// defaultWorkerPoolSize just bounds how many jobs can be in flight to
-	// vLLM at once before the capacity gate (see health.go waitForCapacity)
-	// has a chance to trip -- it is NOT a safety ceiling. The gate is what
-	// protects vLLM: every worker blocks the instant vLLM's own scheduler
-	// reports capacity pressure, regardless of pool size. A generous
-	// default is safe here; it only affects burst-fill speed and
-	// redundant /metrics polling overhead while blocked, never whether
-	// vLLM's real backpressure is respected.
+	// vLLM at once before the admission circuit trips -- it is NOT a safety
+	// ceiling. The circuit (internal/circuit) is what protects vLLM.
 	defaultWorkerPoolSize       = 32
 	defaultDisableCapacityGate  = false
 	defaultMaxAckPending        = -1
