@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -33,6 +34,10 @@ func HandleNonStreaming(prod Producer, timeout time.Duration, upstreamProcessing
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			slog.ErrorContext(r.Context(), "failed to read request body",
+				"err", err,
+				"handler", "sync",
+			)
 			http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -50,6 +55,10 @@ func HandleNonStreaming(prod Producer, timeout time.Duration, upstreamProcessing
 		inbox := nats.NewInbox()
 		inbox, sub, err := prod.SubscribeSync()
 		if err != nil {
+			slog.ErrorContext(r.Context(), "error subscribing to inbox",
+				"err", err,
+				"handler", "sync",
+			)
 			http.Error(w, fmt.Sprintf("failed to subscribe inbox: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -58,6 +67,10 @@ func HandleNonStreaming(prod Producer, timeout time.Duration, upstreamProcessing
 		job.ReplyTo = inbox
 
 		if err := prod.Enqueue(ctx, job); err != nil {
+			slog.ErrorContext(r.Context(), "error enqueuing message",
+				"err", err,
+				"handler", "sync",
+			)
 			status, msg := enqueueHTTPStatus(err)
 			http.Error(w, msg, status)
 			return
@@ -73,6 +86,10 @@ func HandleNonStreaming(prod Producer, timeout time.Duration, upstreamProcessing
 		processingDuration := time.Since(processingStart)
 		upstreamProcessing.WithLabelValues(classifyErrorType(err)).Observe(processingDuration.Seconds())
 		if err != nil {
+			slog.ErrorContext(r.Context(), "error in sync message handling",
+				"err", err,
+				"handler", "sync",
+			)
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
 				writeTimeoutJSON(w, timeout)
 				return
@@ -83,6 +100,10 @@ func HandleNonStreaming(prod Producer, timeout time.Duration, upstreamProcessing
 
 		var result Result
 		if err := json.Unmarshal(msg.Data, &result); err != nil {
+			slog.ErrorContext(r.Context(), "error unmarshaling result data",
+				"err", err,
+				"handler", "sync",
+			)
 			http.Error(w, fmt.Sprintf("failed to unmarshal result: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -94,7 +115,10 @@ func HandleNonStreaming(prod Producer, timeout time.Duration, upstreamProcessing
 		w.WriteHeader(result.Status)
 
 		if _, err := w.Write([]byte(result.Body)); err != nil {
-			fmt.Printf("failed to write response body: %v\n", err)
+			slog.ErrorContext(r.Context(), "failed to write response",
+				"err", err,
+				"handler", "sync",
+			)
 		}
 	}
 }

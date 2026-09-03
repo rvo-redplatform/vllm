@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -80,6 +81,10 @@ func (s *ProxyServer) proxy(w http.ResponseWriter, r *http.Request) {
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
+		slog.ErrorContext(r.Context(), "error reading request body",
+			"err", err,
+		)
+
 		if err.Error() == "http: request body too large" {
 			http.Error(sw, "request body too large", http.StatusRequestEntityTooLarge)
 			return
@@ -91,6 +96,10 @@ func (s *ProxyServer) proxy(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
 	isStreaming := peekStreamFlag(bodyBytes)
+	slog.InfoContext(r.Context(), "handling request",
+		"streaming", isStreaming,
+		"body_size_bytes", len(bodyBytes),
+	)
 
 	var handler http.HandlerFunc
 	if isStreaming {

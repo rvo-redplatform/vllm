@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -24,6 +25,10 @@ func HandleStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
+			slog.ErrorContext(r.Context(), "failed to read request body",
+				"err", err,
+				"handler", "streaming",
+			)
 			http.Error(w, fmt.Sprintf("failed to read body: %v", err), http.StatusBadRequest)
 			return
 		}
@@ -40,6 +45,10 @@ func HandleStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 
 		inbox, sub, err := prod.SubscribeSync()
 		if err != nil {
+			slog.ErrorContext(r.Context(), "error subscribing to inbox",
+				"err", err,
+				"handler", "streaming",
+			)
 			http.Error(w, fmt.Sprintf("failed to subscribe inbox: %v", err), http.StatusInternalServerError)
 			return
 		}
@@ -52,6 +61,10 @@ func HandleStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 		job.ReplyTo = inbox
 
 		if err := prod.Enqueue(ctx, job); err != nil {
+			slog.ErrorContext(r.Context(), "error enqueuing message",
+				"err", err,
+				"handler", "streaming",
+			)
 			status, msg := enqueueHTTPStatus(err)
 			http.Error(w, msg, status)
 			return
@@ -63,6 +76,10 @@ func HandleStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 		for {
 			msg, err := sub.NextMsgWithContext(timeoutCtx)
 			if err != nil {
+				slog.ErrorContext(r.Context(), "error in sse message handling",
+					"err", err,
+					"handler", "streaming",
+				)
 				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, nats.ErrTimeout) {
 					writeTimeoutSSE(w, timeout)
 					return
@@ -74,6 +91,10 @@ func HandleStreaming(prod Producer, timeout time.Duration) http.HandlerFunc {
 
 			var payload map[string]interface{}
 			if err := json.Unmarshal(msg.Data, &payload); err != nil {
+				slog.ErrorContext(r.Context(), "error unmarshaling result data",
+					"err", err,
+					"handler", "streaming",
+				)
 				fmt.Fprintf(w, "data: {\"error\": \"invalid payload\"}\n\n")
 				flushSSE(w)
 				continue

@@ -166,7 +166,7 @@ func (c *Consumer) runJob(ctx context.Context, fetched queue.Message, target str
 		case <-tick.C:
 			if err := fetched.InProgress(ctx); err != nil && ctx.Err() == nil {
 				// not much we can do here
-				slog.WarnContext(ctx, "in progress", "err", err)
+				slog.WarnContext(ctx, "in progress tick error", "err", err)
 			}
 		}
 	}
@@ -180,7 +180,7 @@ func isTimeout(ctx context.Context, err error) bool {
 func (c *Consumer) publishError(fetched queue.Message, status int, body apierror.OpenAIErrorBody) {
 	payload, err := body.Bytes()
 	if err != nil {
-		slog.Error("marshal openai error body",
+		slog.Error("marshal openai body error",
 			"job_id", fetched.Job.JobID,
 			"err", err,
 		)
