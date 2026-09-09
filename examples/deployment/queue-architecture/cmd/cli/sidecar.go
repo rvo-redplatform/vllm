@@ -93,7 +93,11 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		queue.WithStreamName(streamName),
 		queue.WithStreamSubject(streamSubject),
 	)
-	qConsumer := queue.NewConsumer(qClient, queue.WithMaxAckPending(maxAckPending))
+	qConsumer := queue.NewConsumer(
+		qClient,
+		queue.WithMaxAckPending(maxAckPending),
+		queue.WithConsumerName(consumerName),
+	)
 	qConsumer.Connect(cmd.Context())
 	sidecarMetrics := sidecar.NewSidecarMetrics()
 	consumer := sidecar.NewConsumer(qConsumer, sidecarMetrics)
