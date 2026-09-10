@@ -1,6 +1,10 @@
 package queue
 
-import "testing"
+import (
+	"context"
+	"strings"
+	"testing"
+)
 
 // TestNewConsumer_ConsumerName verifies that the configured consumer name is
 // threaded into the consumer config (which becomes the JetStream durable name
@@ -30,5 +34,17 @@ func TestNewConsumer_ConsumerName(t *testing.T) {
 				t.Errorf("ConsumerName: got %q want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConsumerConnect_PropagatesDialFailure(t *testing.T) {
+	c := NewConsumer(NewClient(context.Background()))
+
+	err := c.Connect(context.Background())
+	if err == nil {
+		t.Fatal("Connect() error = nil, want missing NATS URL error")
+	}
+	if !strings.Contains(err.Error(), "NATS_URL is required") {
+		t.Errorf("Connect() error = %q, want missing NATS URL error", err)
 	}
 }

@@ -98,7 +98,9 @@ func runSidecar(cmd *cobra.Command, _ []string) error {
 		queue.WithMaxAckPending(maxAckPending),
 		queue.WithConsumerName(consumerName),
 	)
-	qConsumer.Connect(cmd.Context())
+	if err := qConsumer.Connect(cmd.Context()); err != nil {
+		return fmt.Errorf("connect queue consumer: %w", err)
+	}
 	sidecarMetrics := sidecar.NewSidecarMetrics()
 	consumer := sidecar.NewConsumer(qConsumer, sidecarMetrics)
 	defer qConsumer.Close()

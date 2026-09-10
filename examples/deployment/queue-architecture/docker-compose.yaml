@@ -67,5 +67,56 @@ services:
       sidecar:
         condition: service_started
 
+  mockvllm-qwen:
+    build:
+      context: .
+      dockerfile: Dockerfile.mockvllm
+    ports:
+      - "28000:8000"
+    healthcheck:
+      test: ["CMD", "/app/mockvllm", "--healthcheck"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  sidecar-qwen:
+    build:
+      context: .
+      dockerfile: Dockerfile.sidecar
+    environment:
+      RTR_NATS_URL: "nats://nats:4222"
+      RTR_STREAM_NAME: "vllm_requests_qwen"
+      RTR_STREAM_SUBJECT: "vllm.requests.qwen"
+      RTR_CONSUMER_NAME: "vllm-sidecars-qwen"
+      RTR_VLLM_TARGET: "http://mockvllm-qwen:8000"
+      RTR_WORKER_POOL_SIZE: "1"
+      RTR_DISABLE_CAPACITY_GATE: "true"
+      RTR_MAX_PROCESS_TIMEOUT: "10m"
+    ports:
+      - "28100:9100"
+    depends_on:
+      nats:
+        condition: service_healthy
+      mockvllm-qwen:
+        condition: service_healthy
+
+  proxy-qwen:
+    build:
+      context: .
+      dockerfile: Dockerfile.proxy
+    environment:
+      RTR_NATS_URL: "nats://nats:4222"
+      RTR_STREAM_NAME: "vllm_requests_qwen"
+      RTR_STREAM_SUBJECT: "vllm.requests.qwen"
+      RTR_PORT: "8001"
+    ports:
+      - "28101:8001"
+      - "28110:9100"
+    depends_on:
+      nats:
+        condition: service_healthy
+      sidecar-qwen:
+        condition: service_started
+
 volumes:
   nats-data:
