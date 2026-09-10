@@ -8,7 +8,23 @@ image:
   # -- Image tag
   tag: "latest"
   # -- Container launch command
-  command: ["vllm", "serve", "/data/", "--served-model-name", "opt-125m", "--enforce-eager", "--dtype", "bfloat16", "--block-size", "16", "--host", "0.0.0.0", "--port", "8000"]
+  command:
+    [
+      "vllm",
+      "serve",
+      "/data/",
+      "--served-model-name",
+      "opt-125m",
+      "--enforce-eager",
+      "--dtype",
+      "bfloat16",
+      "--block-size",
+      "16",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "8000",
+    ]
 
 # -- Container port
 containerPort: 8000
@@ -124,7 +140,7 @@ keda:
   # Requires keda.minReplicaCount: 0 to actually reach zero outside the
   # window -- plain HPA can't scale to zero, but KEDA can.
   cron:
-     # -- Enable the cron trigger
+    # -- Enable the cron trigger
     enabled: false
     # -- IANA timezone name (handles DST automatically, e.g. EST/EDT) --
     # NOT a fixed UTC offset.
@@ -405,8 +421,9 @@ readinessProbe:
   # -- How often (in seconds) to perform the readiness probe
   periodSeconds: 5
   # -- Number of times after which if a probe fails in a row, Kubernetes considers that the overall check has failed: the container is not ready
-  failureThreshold: 3
-   # -- Configuration of the Kubelet http request on the server
+  failureThreshold:
+    3
+    # -- Configuration of the Kubelet http request on the server
   httpGet:
     # -- Path to access on the HTTP server
     path: /health
@@ -415,7 +432,7 @@ readinessProbe:
 
 # -- Liveness probe configuration
 livenessProbe:
- # -- Number of seconds after the container has started before liveness probe is initiated
+  # -- Number of seconds after the container has started before liveness probe is initiated
   initialDelaySeconds: 15
   # -- Number of times after which if a probe fails in a row, Kubernetes considers that the overall check has failed: the container is not alive
   failureThreshold: 3

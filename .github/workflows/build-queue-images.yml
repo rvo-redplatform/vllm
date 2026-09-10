@@ -1,11 +1,8 @@
 name: Build and Publish Queue Architecture Images
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "examples/deployment/queue-architecture/**"
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -36,6 +33,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/rvo-redplatform/vllm-sidecar:latest
+            ghcr.io/rvo-redplatform/vllm-sidecar:${{ (github.event_name == 'release' && github.event.release.tag_name) || github.sha }}
             ghcr.io/rvo-redplatform/vllm-sidecar:${{ github.sha }}
 
   build-proxy:
@@ -61,4 +59,5 @@ jobs:
           push: true
           tags: |
             ghcr.io/rvo-redplatform/vllm-proxy:latest
+            ghcr.io/rvo-redplatform/vllm-proxy:${{ (github.event_name == 'release' && github.event.release.tag_name) || github.sha }}
             ghcr.io/rvo-redplatform/vllm-proxy:${{ github.sha }}
