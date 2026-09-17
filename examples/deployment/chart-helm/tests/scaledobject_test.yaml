@@ -8,7 +8,9 @@ tests:
     set:
       keda:
         enabled: true
-        prometheusServerAddress: "http://prometheus-server.vllm.svc.cluster.local:80"
+        prometheus:
+          enabled: true
+          serverAddress: "http://prometheus-server.vllm.svc.cluster.local:80"
         natsJetStream:
           enabled: true
           natsServerMonitoringEndpoint: "nats.nats.svc.cluster.local:8222"
@@ -35,7 +37,9 @@ tests:
     set:
       keda:
         enabled: true
-        prometheusServerAddress: "http://prometheus-server.vllm.svc.cluster.local:80"
+        prometheus:
+          enabled: true
+          serverAddress: "http://prometheus-server.vllm.svc.cluster.local:80"
     asserts:
       - hasDocuments:
           count: 1
@@ -45,3 +49,22 @@ tests:
       - equal:
           path: spec.triggers[0].type
           value: prometheus
+
+  - it: should omit prometheus when disabled and nats-jetstream is enabled
+    set:
+      keda:
+        enabled: true
+        prometheus:
+          enabled: false
+        natsJetStream:
+          enabled: true
+          natsServerMonitoringEndpoint: "nats.nats.svc.cluster.local:8222"
+    asserts:
+      - hasDocuments:
+          count: 1
+      - lengthEqual:
+          path: spec.triggers
+          count: 1
+      - equal:
+          path: spec.triggers[0].type
+          value: nats-jetstream

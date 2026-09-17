@@ -9,7 +9,7 @@ regardless of how saturated the GPU/queue actually is, so plain HPA
 Requires the KEDA operator + CRDs to already be installed cluster-wide, and
 a Prometheus instance scraping this pod's /metrics endpoint (see
 .Values.podAnnotations for the scrape annotations, and
-.Values.keda.prometheusServerAddress for where to query).
+.Values.keda.prometheus.serverAddress for where to query).
 
 .Values.autoscaling.enabled (HPA) and .Values.keda.enabled (this) are
 mutually exclusive -- both control the same Deployment's replica count and
@@ -107,9 +107,11 @@ spec:
         lagThreshold: {{ .Values.keda.natsJetStream.lagThreshold | quote }}
         activationLagThreshold: {{ .Values.keda.natsJetStream.activationLagThreshold | quote }}
     {{- end }}
+    {{- if .Values.keda.prometheus.enabled }}
     - type: prometheus
       metadata:
-        serverAddress: {{ required "Value 'keda.prometheusServerAddress' must be defined when keda.enabled=true !" .Values.keda.prometheusServerAddress | quote }}
-        query: {{ .Values.keda.query | quote }}
-        threshold: {{ .Values.keda.threshold | quote }}
+        serverAddress: {{ required "Value 'keda.prometheus.serverAddress' must be defined when keda.prometheus.enabled=true !" .Values.keda.prometheus.serverAddress | quote }}
+        query: {{ .Values.keda.prometheus.query | quote }}
+        threshold: {{ .Values.keda.prometheus.threshold | quote }}
+    {{- end }}
 {{- end }}
