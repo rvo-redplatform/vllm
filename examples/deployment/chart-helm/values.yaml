@@ -116,17 +116,21 @@ keda:
     # current replicas that can be removed per policyPeriodSeconds.
     policyPercent: 33
     policyPeriodSeconds: 60
-  # -- Prometheus server address to query, e.g. http://prometheus-server.vllm.svc.cluster.local:9090
-  prometheusServerAddress: ""
-  # -- PromQL query; must return a single vector/scalar element. sum() is
-  # required once there's more than one replica, since each pod exposes its
-  # own gauge value as a separate scrape target/time series.
-  query: "sum(vllm:num_requests_waiting)"
-  # -- Threshold for the proportional scaling formula:
-  # desiredReplicas = ceil(currentReplicas * currentMetricValue / threshold).
-  # This is NOT a strict step function -- see chart README/PR notes for the
-  # worked example of how this behaves at low replica counts.
-  threshold: "2"
+  # -- KEDA prometheus trigger on vllm:num_requests_waiting. Disable when
+  # using natsJetStream (or redisStreams) as the sole backlog signal.
+  prometheus:
+    enabled: true
+    # -- Prometheus server address to query, e.g. http://prometheus-server.vllm.svc.cluster.local:9090
+    serverAddress: ""
+    # -- PromQL query; must return a single vector/scalar element. sum() is
+    # required once there's more than one replica, since each pod exposes its
+    # own gauge value as a separate scrape target/time series.
+    query: "sum(vllm:num_requests_waiting)"
+    # -- Threshold for the proportional scaling formula:
+    # desiredReplicas = ceil(currentReplicas * currentMetricValue / threshold).
+    # This is NOT a strict step function -- see chart README/PR notes for the
+    # worked example of how this behaves at low replica counts.
+    threshold: "2"
 
   # -- Optional business-hours scheduling via KEDA's cron trigger, combined
   # with the Prometheus trigger above in the same ScaledObject. KEDA takes
